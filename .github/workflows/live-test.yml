@@ -17,6 +17,13 @@ permissions:
   contents: read
   id-token: write
 
+env:
+  GCP_WIF_PROVIDER: 'projects/47347081886/locations/global/workloadIdentityPools/gh-actions-pool/providers/gh-oidc-provider'
+  GCP_PROJECT_STANDARD: 'sakm-ci-std-8560'
+  GCP_PROJECT_NO_CREATE: 'sakm-ci-noc-8560'
+  GCP_PROJECT_NO_UPLOAD: 'sakm-ci-nou-8560'
+  GCP_PROJECT_EXPIRY_24H: 'sakm-ci-exp-8560'
+
 jobs:
   live-test:
     name: Live Test (${{ matrix.name }})
@@ -29,27 +36,27 @@ jobs:
           - runner: ubuntu-latest
             name: Linux x86_64
             runner_id: linux-amd64
-            sa_env: GCP_SA_LINUX_AMD64
+            service_account: sa-ci-linux-amd64@sakm-ci-std-8560.iam.gserviceaccount.com
           # Native Linux ARM64
           - runner: ubuntu-24.04-arm
             name: Linux ARM64
             runner_id: linux-arm64
-            sa_env: GCP_SA_LINUX_ARM64
+            service_account: sa-ci-linux-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
           # Native macOS Apple Silicon ARM64 (Intel x86_64 Mac explicitly excluded)
           - runner: macos-latest
             name: macOS Apple Silicon (ARM64)
             runner_id: macos-arm64
-            sa_env: GCP_SA_MACOS_ARM64
+            service_account: sa-ci-macos-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
           # Native Windows x86_64
           - runner: windows-latest
             name: Windows x86_64
             runner_id: windows-amd64
-            sa_env: GCP_SA_WINDOWS_AMD64
+            service_account: sa-ci-windows-amd64@sakm-ci-std-8560.iam.gserviceaccount.com
           # Native Windows ARM64
           - runner: windows-11-arm
             name: Windows ARM64
             runner_id: windows-arm64
-            sa_env: GCP_SA_WINDOWS_ARM64
+            service_account: sa-ci-windows-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -59,30 +66,11 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Resolve Runner Service Account
-        id: resolve_sa
-        shell: bash
-        run: |
-          SA_NAME="${{ matrix.sa_env }}"
-          # Resolve SA from GitHub repository variables or secrets
-          SA_VAL="${!SA_NAME:-}"
-          if [ -z "$SA_VAL" ]; then
-            case "${{ matrix.runner_id }}" in
-              linux-amd64) SA_VAL="${{ vars.GCP_SA_LINUX_AMD64 }}" ;;
-              linux-arm64) SA_VAL="${{ vars.GCP_SA_LINUX_ARM64 }}" ;;
-              macos-arm64) SA_VAL="${{ vars.GCP_SA_MACOS_ARM64 }}" ;;
-              windows-amd64) SA_VAL="${{ vars.GCP_SA_WINDOWS_AMD64 }}" ;;
-              windows-arm64) SA_VAL="${{ vars.GCP_SA_WINDOWS_ARM64 }}" ;;
-            esac
-          fi
-          echo "service_account=$SA_VAL" >> $GITHUB_OUTPUT
-
       - name: Authenticate to Google Cloud via Workload Identity Federation
-        if: vars.GCP_WIF_PROVIDER != '' && steps.resolve_sa.outputs.service_account != ''
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ steps.resolve_sa.outputs.service_account }}
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ matrix.service_account }}
 
       - name: Build native binary
         shell: bash
@@ -93,13 +81,10 @@ jobs:
       - name: Run Live GCP Integration Tests
         shell: bash
         env:
-          GCP_PROJECT_STANDARD: ${{ vars.GCP_PROJECT_STANDARD }}
-          GCP_PROJECT_NO_CREATE: ${{ vars.GCP_PROJECT_NO_CREATE }}
-          GCP_PROJECT_NO_UPLOAD: ${{ vars.GCP_PROJECT_NO_UPLOAD }}
-          GCP_PROJECT_EXPIRY_24H: ${{ vars.GCP_PROJECT_EXPIRY_24H }}
+          GCP_PROJECT_STANDARD: ${{ env.GCP_PROJECT_STANDARD }}
+          GCP_PROJECT_NO_CREATE: ${{ env.GCP_PROJECT_NO_CREATE }}
+          GCP_PROJECT_NO_UPLOAD: ${{ env.GCP_PROJECT_NO_UPLOAD }}
+          GCP_PROJECT_EXPIRY_24H: ${{ env.GCP_PROJECT_EXPIRY_24H }}
           GCP_RUNNER_ID: ${{ matrix.runner_id }}
         run: |
-          if [ -z "$GCP_PROJECT_STANDARD" ]; then
-            echo "::warning::GCP_PROJECT_STANDARD is not configured. Live tests will be skipped."
-          fi
           go test -v -tags=live ./test/integration/...
