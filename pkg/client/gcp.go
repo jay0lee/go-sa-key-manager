@@ -88,7 +88,8 @@ func (c *GCPClient) ListKeys(ctx context.Context, saEmail string, keyTypes []Key
 // GetKey retrieves a specific key for the service account.
 func (c *GCPClient) GetKey(ctx context.Context, saEmail, keyID string) (*KeyInfo, error) {
 	req := &adminpb.GetServiceAccountKeyRequest{
-		Name: FormatKeyResourceName(saEmail, keyID),
+		Name:          FormatKeyResourceName(saEmail, keyID),
+		PublicKeyType: adminpb.ServiceAccountPublicKeyType_TYPE_X509_PEM_FILE,
 	}
 
 	resp, err := c.api.GetServiceAccountKey(ctx, req)

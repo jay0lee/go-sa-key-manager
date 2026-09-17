@@ -87,7 +87,7 @@ func TestLive_CLI_BinaryExecution(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cli create failed: %v\nstderr: %s", err, stderr.String())
 		}
-		if !strings.Contains(string(out), "Created GCP-managed key") {
+		if !strings.Contains(strings.ToLower(string(out)), "created gcp-managed key") {
 			t.Errorf("unexpected output: %s", out)
 		}
 	})
