@@ -433,39 +433,47 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		if err != nil {
 			t.Fatalf("disable failed: %v\nstderr: %s", err, stderr)
 		}
-		// Confirm Disabled == true propagates across CLI get calls
-		deadline := time.Now().Add(30 * time.Second)
+		// Confirm Disabled == true propagates across CLI get calls (allow up to 60s for GCP IAM propagation)
+		deadline := time.Now().Add(60 * time.Second)
 		var keyInfo client.KeyInfo
+		var lastStdout string
+		var lastErr error
 		for time.Now().Before(deadline) {
-			stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			var stdout string
+			stdout, _, err = executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			lastStdout = stdout
+			lastErr = err
 			if err == nil {
 				if jsonErr := json.Unmarshal([]byte(stdout), &keyInfo); jsonErr == nil && keyInfo.Disabled {
 					break
 				}
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 		if !keyInfo.Disabled {
-			t.Errorf("expected key to be disabled")
+			t.Errorf("expected key to be disabled within 60s; last disabled=%v, err=%v, stdout=%s", keyInfo.Disabled, lastErr, lastStdout)
 		}
 
 		_, stderr, err = executeCLI("enable", saEmail, createdKeyID)
 		if err != nil {
 			t.Fatalf("enable failed: %v\nstderr: %s", err, stderr)
 		}
-		// Confirm Disabled == false propagates across CLI get calls
-		deadline = time.Now().Add(30 * time.Second)
+		// Confirm Disabled == false propagates across CLI get calls (allow up to 60s for GCP IAM propagation)
+		deadline = time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
-			stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			var stdout string
+			stdout, _, err = executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			lastStdout = stdout
+			lastErr = err
 			if err == nil {
 				if jsonErr := json.Unmarshal([]byte(stdout), &keyInfo); jsonErr == nil && !keyInfo.Disabled {
 					break
 				}
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 		if keyInfo.Disabled {
-			t.Errorf("expected key to be enabled")
+			t.Errorf("expected key to be enabled within 60s; last disabled=%v, err=%v, stdout=%s", keyInfo.Disabled, lastErr, lastStdout)
 		}
 	})
 
