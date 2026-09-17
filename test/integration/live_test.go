@@ -267,6 +267,8 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 	tmpDir := t.TempDir()
 	defer secureWipeAndRemoveDir(tmpDir)
 
+	var createdKeyID string
+
 	// 1. Create GCP-managed key (dual-verified: gotten via IAM and found in public metadata)
 	t.Run("1_CreateKey", func(t *testing.T) {
 		credsPath := filepath.Join(tmpDir, "gcp-managed.json")
@@ -280,30 +282,62 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		if _, err := os.Stat(credsPath); err != nil {
 			t.Fatalf("creds file not created: %v", err)
 		}
+		// Extract key ID directly from output: "Successfully created GCP-managed key: <key-id>"
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.Contains(line, "Successfully created GCP-managed key:") {
+				parts := strings.Fields(line)
+				if len(parts) >= 5 {
+					createdKeyID = strings.TrimSpace(parts[4])
+					t.Logf("Extracted created key ID from create output: %s", createdKeyID)
+				}
+			}
+		}
 	})
 
-	// 2. List keys in JSON format
-	var createdKeyID string
+	// 2. List keys in JSON format (polling list index until created key appears)
 	t.Run("2_ListKeys", func(t *testing.T) {
-		stdout, stderr, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
-		if err != nil {
-			t.Fatalf("list failed: %v\nstderr: %s", err, stderr)
-		}
 		var keys []client.KeyInfo
-		if err := json.Unmarshal([]byte(stdout), &keys); err != nil || len(keys) == 0 {
-			t.Fatalf("expected at least 1 user key, found 0 (output: %s)", stdout)
+		deadline := time.Now().Add(30 * time.Second)
+		var lastOut string
+		for time.Now().Before(deadline) {
+			stdout, _, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
+			if err == nil {
+				lastOut = stdout
+				var parsed []client.KeyInfo
+				if jsonErr := json.Unmarshal([]byte(stdout), &parsed); jsonErr == nil && len(parsed) > 0 {
+					if createdKeyID == "" || parsed[0].ID == createdKeyID {
+						keys = parsed
+						break
+					}
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
-		createdKeyID = keys[0].ID
-		t.Logf("Found key ID: %s", createdKeyID)
+		if len(keys) == 0 {
+			t.Fatalf("expected at least 1 user key in list index, found 0 (last output: %s)", lastOut)
+		}
+		if createdKeyID == "" {
+			createdKeyID = keys[0].ID
+		}
+		t.Logf("Confirmed key ID in list: %s", createdKeyID)
 	})
 
-	// 3. Get key details and extract public key
+	// 3. Get key details and extract public key (polling until replica propagates)
 	t.Run("3_GetKey", func(t *testing.T) {
 		if createdKeyID == "" {
 			t.Skip("createdKeyID not found")
 		}
 		pubKeyPath := filepath.Join(tmpDir, "key.pem")
-		stdout, stderr, err := executeCLI("get", saEmail, createdKeyID, "--public-key", "-o", pubKeyPath)
+		var stdout, stderr string
+		var err error
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			stdout, stderr, err = executeCLI("get", saEmail, createdKeyID, "--public-key", "-o", pubKeyPath)
+			if err == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 		if err != nil {
 			t.Fatalf("get failed: %v\nstderr: %s", err, stderr)
 		}
@@ -315,7 +349,7 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 4. Disable and Re-enable key (with explicit state barriers)
+	// 4. Disable and Re-enable key (polling until replica reflects state)
 	t.Run("4_DisableAndEnableKey", func(t *testing.T) {
 		if createdKeyID == "" {
 			t.Skip("createdKeyID not found")
@@ -324,15 +358,17 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		if err != nil {
 			t.Fatalf("disable failed: %v\nstderr: %s", err, stderr)
 		}
-		waitForKeyStatus(t, ctx, iamClient, saEmail, createdKeyID, true)
-
-		stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
-		if err != nil {
-			t.Fatalf("get disabled failed: %v", err)
-		}
+		// Confirm Disabled == true propagates across CLI get calls
+		deadline := time.Now().Add(30 * time.Second)
 		var keyInfo client.KeyInfo
-		if err := json.Unmarshal([]byte(stdout), &keyInfo); err != nil {
-			t.Fatalf("failed to parse key json: %v", err)
+		for time.Now().Before(deadline) {
+			stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			if err == nil {
+				if jsonErr := json.Unmarshal([]byte(stdout), &keyInfo); jsonErr == nil && keyInfo.Disabled {
+					break
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 		if !keyInfo.Disabled {
 			t.Errorf("expected key to be disabled")
@@ -342,7 +378,20 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		if err != nil {
 			t.Fatalf("enable failed: %v\nstderr: %s", err, stderr)
 		}
-		waitForKeyStatus(t, ctx, iamClient, saEmail, createdKeyID, false)
+		// Confirm Disabled == false propagates across CLI get calls
+		deadline = time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			if err == nil {
+				if jsonErr := json.Unmarshal([]byte(stdout), &keyInfo); jsonErr == nil && !keyInfo.Disabled {
+					break
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if keyInfo.Disabled {
+			t.Errorf("expected key to be enabled")
+		}
 	})
 
 	// 5. Generate local 2048-bit key with custom validity (dual-verified)
