@@ -41,12 +41,17 @@ func newCreateCmd(app *App) *cobra.Command {
 			}
 
 			if targetFile == "-" {
-				_, err := app.Out.Write(key.PrivateKeyData)
-				return err
+				if _, err := app.Out.Write(key.PrivateKeyData); err != nil {
+					return err
+				}
+			} else {
+				if err := app.OSWriteFile(targetFile, key.PrivateKeyData, 0600); err != nil {
+					return fmt.Errorf("failed to save private key credentials to %q: %w", targetFile, err)
+				}
 			}
 
-			if err := app.OSWriteFile(targetFile, key.PrivateKeyData, 0600); err != nil {
-				return fmt.Errorf("failed to save private key credentials to %q: %w", targetFile, err)
+			if err := app.VerifyKeyReady(cmd.Context(), iamClient, saEmail, key.ID); err != nil {
+				return fmt.Errorf("key created but failed readiness verification: %w", err)
 			}
 
 			fmt.Fprintf(app.Out, "Successfully created GCP-managed key: %s\nSaved credentials to: %s\n", key.ID, targetFile)

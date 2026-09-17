@@ -56,6 +56,9 @@ func newTestEnv() *testEnv {
 			BuildGCPCredentialsJSON:     crypto.BuildGCPCredentialsJSON,
 			WrapRSAPublicKeyInCert:      crypto.WrapRSAPublicKeyInCert,
 		},
+		VerifyKeyReady: func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+			return nil
+		},
 		Format: "table",
 	}
 
@@ -91,6 +94,11 @@ func TestNewDefaultAppAndRoot(t *testing.T) {
 	if c != nil {
 		_ = c.Close()
 	}
+
+	// Test VerifyKeyReady from NewDefaultApp
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = app.VerifyKeyReady(canceledCtx, client.NewMockIAMClient(), "sa@proj", "key-1")
 }
 
 func TestParseValidityDuration(t *testing.T) {
@@ -324,6 +332,13 @@ func TestCreateCommand(t *testing.T) {
 		t.Fatalf("expected service_account JSON in stdout: %s", env.stdout.String())
 	}
 
+	// Stdout write error on create -o -
+	env.app.Out = failWriter{}
+	if err := executeCommand(env.app, "create", sa, "-o", "-"); err == nil {
+		t.Fatalf("expected stdout write error in create")
+	}
+	env.app.Out = env.stdout
+
 	// Write file error
 	env.app.OSWriteFile = func(filename string, data []byte, perm os.FileMode) error {
 		return errors.New("write failed")
@@ -372,6 +387,17 @@ func TestCreateCommand_EmptyPrivateKeyData(t *testing.T) {
 	}
 	if err := executeCommand(env.app, "create", sa); err == nil {
 		t.Fatalf("expected error for empty private key data")
+	}
+}
+
+func TestCreateCommand_VerifyKeyReadyError(t *testing.T) {
+	env := newTestEnv()
+	sa := "sa@proj.iam.gserviceaccount.com"
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return errors.New("readiness verification timeout")
+	}
+	if err := executeCommand(env.app, "create", sa); err == nil {
+		t.Fatalf("expected error from failed VerifyKeyReady")
 	}
 }
 
@@ -481,6 +507,21 @@ func TestGenerateCommand(t *testing.T) {
 	if err := executeCommand(env.app, "generate", sa, "--out-cert", "cert.pem"); err == nil {
 		t.Fatalf("expected write cert error")
 	}
+
+	// VerifyKeyReady failure
+	env.app.OSWriteFile = func(filename string, data []byte, perm os.FileMode) error {
+		env.files[filename] = data
+		return nil
+	}
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return errors.New("verification timeout")
+	}
+	if err := executeCommand(env.app, "generate", sa); err == nil {
+		t.Fatalf("expected error from failed VerifyKeyReady in generate")
+	}
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return nil
+	}
 }
 
 func TestUploadCommand(t *testing.T) {
@@ -567,6 +608,17 @@ func TestUploadCommand(t *testing.T) {
 	// Successful upload of raw RSA public key with --wrap-rsa
 	if err := executeCommand(env.app, "upload", sa, "pub.pem", "--wrap-rsa", "--wrap-validity", "720h"); err != nil {
 		t.Fatalf("unexpected wrap-rsa upload error: %v", err)
+	}
+
+	// VerifyKeyReady failure in upload
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return errors.New("upload readiness verification timeout")
+	}
+	if err := executeCommand(env.app, "upload", sa, "valid.crt"); err == nil {
+		t.Fatalf("expected error from failed VerifyKeyReady in upload")
+	}
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return nil
 	}
 }
 
@@ -748,6 +800,21 @@ func TestRotateCommand(t *testing.T) {
 		Disabled:        false,
 		ValidBeforeTime: now.Add(24 * time.Hour),
 	})
+
+	// VerifyKeyReady failure in rotate (old keys must remain untouched)
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return errors.New("rotate readiness verification failed")
+	}
+	if err := executeCommand(env.app, "rotate", sa, "--method", "gcp", "--delete-old"); err == nil {
+		t.Fatalf("expected error from failed VerifyKeyReady in rotate")
+	}
+	oldKey, err := env.mockClient.GetKey(context.Background(), sa, "old-active-key")
+	if err != nil || oldKey == nil {
+		t.Fatalf("old key should not have been deleted when VerifyKeyReady failed: %v", err)
+	}
+	env.app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		return nil
+	}
 
 	// Delete old key error
 	env.mockClient.DeleteKeyErr = errors.New("delete failed")

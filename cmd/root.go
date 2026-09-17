@@ -25,15 +25,19 @@ type CryptoOps struct {
 	WrapRSAPublicKeyInCert      func(pub *rsa.PublicKey, signer cryptopkg.Signer, validity time.Duration, commonName string) ([]byte, error)
 }
 
+// KeyReadinessVerifier verifies a key is both queryable via IAM and published publicly.
+type KeyReadinessVerifier func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error
+
 // App encapsulates dependencies for the CLI application.
 type App struct {
-	In            io.Reader
-	Out           io.Writer
-	ErrOut        io.Writer
-	ClientFactory func(ctx context.Context, credentialsFile string) (client.IAMClient, error)
-	OSWriteFile   func(filename string, data []byte, perm os.FileMode) error
-	OSReadFile    func(filename string) ([]byte, error)
-	Crypto        CryptoOps
+	In             io.Reader
+	Out            io.Writer
+	ErrOut         io.Writer
+	ClientFactory  func(ctx context.Context, credentialsFile string) (client.IAMClient, error)
+	VerifyKeyReady KeyReadinessVerifier
+	OSWriteFile    func(filename string, data []byte, perm os.FileMode) error
+	OSReadFile     func(filename string) ([]byte, error)
+	Crypto         CryptoOps
 
 	// Global flag values
 	Format          string
@@ -51,6 +55,9 @@ func NewDefaultApp() *App {
 			return client.NewGCPClient(ctx, client.GCPClientOptions{
 				CredentialsFile: credentialsFile,
 			})
+		},
+		VerifyKeyReady: func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+			return client.WaitForKeyFullyPropagated(ctx, iamClient, saEmail, keyID, 45*time.Second)
 		},
 		OSWriteFile: os.WriteFile,
 		OSReadFile:  os.ReadFile,

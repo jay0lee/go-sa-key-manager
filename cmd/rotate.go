@@ -147,6 +147,11 @@ func newRotateCmd(app *App) *cobra.Command {
 				}
 			}
 
+			// 3.5. Verify new key is fully propagated before retiring old keys
+			if err := app.VerifyKeyReady(cmd.Context(), iamClient, saEmail, newKeyID); err != nil {
+				return fmt.Errorf("new key %s created but failed readiness verification (old keys left unchanged): %w", newKeyID, err)
+			}
+
 			// 4. Handle old keys
 			result := RotationResult{
 				ServiceAccount:  saEmail,

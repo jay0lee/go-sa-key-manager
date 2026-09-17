@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -11,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // getBinaryPath returns the path to the compiled gcp-sa-key-manager binary.
@@ -46,7 +44,7 @@ func TestLive_CLI_BinaryExecution(t *testing.T) {
 	binPath := getBinaryPath(t)
 	ctx := context.Background()
 
-	saEmail, cleanup := createEphemeralServiceAccount(t, ctx, cfg.StandardProject, cfg.RunnerID)
+	saEmail, _, cleanup := createEphemeralServiceAccount(t, ctx, cfg.StandardProject, cfg.RunnerID)
 	defer cleanup()
 
 	tmpDir := t.TempDir()
@@ -64,31 +62,19 @@ func TestLive_CLI_BinaryExecution(t *testing.T) {
 		}
 	})
 
-	// 2. Create key via binary subprocess
+	// 2. Create key via binary subprocess (dual-verified: gotten via IAM and found in public metadata)
 	t.Run("CLI_CreateKey", func(t *testing.T) {
 		credsPath := filepath.Join(tmpDir, "cli-creds.json")
-		var out []byte
-		var stderr bytes.Buffer
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			stderr.Reset()
-			cmd := exec.Command(binPath, "create", saEmail, "-o", credsPath)
-			cmd.Stderr = &stderr
-			out, err = cmd.Output()
-			if err == nil {
-				break
-			}
-			if strings.Contains(stderr.String(), "does not exist") || strings.Contains(stderr.String(), "PermissionDenied") {
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			break
-		}
+		cmd := exec.Command(binPath, "create", saEmail, "-o", credsPath)
+		out, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("cli create failed: %v\nstderr: %s", err, stderr.String())
+			t.Fatalf("cli create failed: %v\noutput: %s", err, string(out))
 		}
 		if !strings.Contains(strings.ToLower(string(out)), "created gcp-managed key") {
 			t.Errorf("unexpected output: %s", out)
+		}
+		if _, statErr := os.Stat(credsPath); statErr != nil {
+			t.Fatalf("creds file not created: %v", statErr)
 		}
 	})
 

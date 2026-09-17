@@ -21,6 +21,8 @@ import (
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
 	"github.com/jay0lee/go-sa-key-manager/cmd"
 	"github.com/jay0lee/go-sa-key-manager/pkg/client"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type liveTestConfig struct {
@@ -119,8 +121,8 @@ func purgeStaleTestArtifacts(t *testing.T, ctx context.Context, iamClient *admin
 	}
 }
 
-// createEphemeralServiceAccount creates an ephemeral service account for testing and returns its email and cleanup func.
-func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID, runnerID string) (string, func()) {
+// createEphemeralServiceAccount creates an ephemeral service account for testing and returns its email, IAM client, and cleanup func.
+func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID, runnerID string) (string, *admin.IamClient, func()) {
 	t.Helper()
 	iamClient, err := admin.NewIamClient(ctx)
 	if err != nil {
@@ -155,7 +157,7 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 	// Explicitly verify zero user keys exist initially
 	revokeAllUserKeys(ctx, iamClient, sa.Name)
 
-	// Wait for newly created service account to propagate in IAM
+	// Wait for newly created service account to propagate in IAM and public metadata endpoint
 	waitForServiceAccountReady(t, ctx, iamClient, email)
 
 	cleanup := func() {
@@ -171,28 +173,73 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 		_ = iamClient.DeleteServiceAccount(context.Background(), delReq)
 	}
 
-	return email, cleanup
+	return email, iamClient, cleanup
 }
 
-// waitForServiceAccountReady polls IAM until the newly created service account is queryable.
+// waitForServiceAccountReady polls until the newly created service account is queryable
+// in both IAM and the public unauthenticated metadata endpoint.
 func waitForServiceAccountReady(t *testing.T, ctx context.Context, iamClient *admin.IamClient, saEmail string) {
 	t.Helper()
-	deadline := time.Now().Add(45 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	resourceName := "projects/-/serviceAccounts/" + saEmail
 	for time.Now().Before(deadline) {
-		_, err := iamClient.ListServiceAccountKeys(ctx, &adminpb.ListServiceAccountKeysRequest{
-			Name: resourceName,
-			KeyTypes: []adminpb.ListServiceAccountKeysRequest_KeyType{
-				adminpb.ListServiceAccountKeysRequest_USER_MANAGED,
-			},
+		sa, saErr := iamClient.GetServiceAccount(ctx, &adminpb.GetServiceAccountRequest{Name: resourceName})
+		if saErr == nil && sa != nil {
+			_, listErr := iamClient.ListServiceAccountKeys(ctx, &adminpb.ListServiceAccountKeysRequest{
+				Name: resourceName,
+				KeyTypes: []adminpb.ListServiceAccountKeysRequest_KeyType{
+					adminpb.ListServiceAccountKeysRequest_USER_MANAGED,
+				},
+			})
+			if listErr == nil {
+				_, pubErr := client.FetchPublicKeys(ctx, nil, "", saEmail)
+				if pubErr == nil {
+					t.Logf("Service account %s is fully propagated in IAM and public metadata endpoint", saEmail)
+					return
+				}
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("timed out waiting for service account %s to fully propagate", saEmail)
+}
+
+// waitForKeyStatus polls until a key's Disabled state matches wantDisabled.
+func waitForKeyStatus(t *testing.T, ctx context.Context, iamClient *admin.IamClient, saEmail, keyID string, wantDisabled bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	keyResource := client.FormatKeyResourceName(saEmail, keyID)
+	for time.Now().Before(deadline) {
+		key, err := iamClient.GetServiceAccountKey(ctx, &adminpb.GetServiceAccountKeyRequest{
+			Name: keyResource,
 		})
-		if err == nil {
-			t.Logf("Service account %s is propagated and accessible via %s", saEmail, resourceName)
+		if err == nil && key != nil && key.Disabled == wantDisabled {
+			t.Logf("Key %s has reached disabled=%v", keyID, wantDisabled)
 			return
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
-	t.Logf("Warning: timed out waiting for %s to propagate", saEmail)
+	t.Fatalf("timed out waiting for key %s to reach disabled=%v", keyID, wantDisabled)
+}
+
+// waitForKeyDeleted polls until a key returns NotFound from GetServiceAccountKey.
+func waitForKeyDeleted(t *testing.T, ctx context.Context, iamClient *admin.IamClient, saEmail, keyID string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	keyResource := client.FormatKeyResourceName(saEmail, keyID)
+	for time.Now().Before(deadline) {
+		_, err := iamClient.GetServiceAccountKey(ctx, &adminpb.GetServiceAccountKeyRequest{
+			Name: keyResource,
+		})
+		if err != nil {
+			if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
+				t.Logf("Key %s confirmed deleted", keyID)
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for key %s deletion to propagate", keyID)
 }
 
 func executeCLI(args ...string) (string, string, error) {
@@ -214,28 +261,16 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 	cfg := getLiveConfig(t)
 	ctx := context.Background()
 
-	saEmail, cleanup := createEphemeralServiceAccount(t, ctx, cfg.StandardProject, cfg.RunnerID)
+	saEmail, iamClient, cleanup := createEphemeralServiceAccount(t, ctx, cfg.StandardProject, cfg.RunnerID)
 	defer cleanup()
 
 	tmpDir := t.TempDir()
 	defer secureWipeAndRemoveDir(tmpDir)
 
-	// 1. Create GCP-managed key
+	// 1. Create GCP-managed key (dual-verified: gotten via IAM and found in public metadata)
 	t.Run("1_CreateKey", func(t *testing.T) {
 		credsPath := filepath.Join(tmpDir, "gcp-managed.json")
-		var stdout, stderr string
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			stdout, stderr, err = executeCLI("create", saEmail, "-o", credsPath)
-			if err == nil {
-				break
-			}
-			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "PermissionDenied") {
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			break
-		}
+		stdout, stderr, err := executeCLI("create", saEmail, "-o", credsPath)
 		if err != nil {
 			t.Fatalf("create failed: %v\nstderr: %s", err, stderr)
 		}
@@ -247,53 +282,28 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 2. List keys in JSON format (polling for index propagation)
+	// 2. List keys in JSON format
 	var createdKeyID string
 	t.Run("2_ListKeys", func(t *testing.T) {
-		var keys []client.KeyInfo
-		var lastOut string
-		var lastErr error
-		deadline := time.Now().Add(15 * time.Second)
-		for time.Now().Before(deadline) {
-			stdout, stderr, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
-			if err == nil {
-				lastOut = stdout
-				var parsed []client.KeyInfo
-				if jsonErr := json.Unmarshal([]byte(stdout), &parsed); jsonErr == nil && len(parsed) > 0 {
-					keys = parsed
-					break
-				}
-			} else {
-				lastErr = fmt.Errorf("list error: %v (stderr: %s)", err, stderr)
-			}
-			time.Sleep(1 * time.Second)
+		stdout, stderr, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
+		if err != nil {
+			t.Fatalf("list failed: %v\nstderr: %s", err, stderr)
 		}
-		if len(keys) == 0 {
-			t.Fatalf("expected at least 1 user key, found 0 (last output: %s, last err: %v)", lastOut, lastErr)
+		var keys []client.KeyInfo
+		if err := json.Unmarshal([]byte(stdout), &keys); err != nil || len(keys) == 0 {
+			t.Fatalf("expected at least 1 user key, found 0 (output: %s)", stdout)
 		}
 		createdKeyID = keys[0].ID
 		t.Logf("Found key ID: %s", createdKeyID)
 	})
 
-	// 3. Get key details and extract public key (with retry for key replication)
+	// 3. Get key details and extract public key
 	t.Run("3_GetKey", func(t *testing.T) {
 		if createdKeyID == "" {
 			t.Skip("createdKeyID not found")
 		}
 		pubKeyPath := filepath.Join(tmpDir, "key.pem")
-		var stdout, stderr string
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			stdout, stderr, err = executeCLI("get", saEmail, createdKeyID, "--public-key", "-o", pubKeyPath)
-			if err == nil {
-				break
-			}
-			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "NotFound") {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			break
-		}
+		stdout, stderr, err := executeCLI("get", saEmail, createdKeyID, "--public-key", "-o", pubKeyPath)
 		if err != nil {
 			t.Fatalf("get failed: %v\nstderr: %s", err, stderr)
 		}
@@ -305,36 +315,18 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 4. Disable and Re-enable key
+	// 4. Disable and Re-enable key (with explicit state barriers)
 	t.Run("4_DisableAndEnableKey", func(t *testing.T) {
 		if createdKeyID == "" {
 			t.Skip("createdKeyID not found")
 		}
-		var stderr string
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			_, stderr, err = executeCLI("disable", saEmail, createdKeyID)
-			if err == nil {
-				break
-			}
-			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "NotFound") {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			break
-		}
+		_, stderr, err := executeCLI("disable", saEmail, createdKeyID)
 		if err != nil {
 			t.Fatalf("disable failed: %v\nstderr: %s", err, stderr)
 		}
+		waitForKeyStatus(t, ctx, iamClient, saEmail, createdKeyID, true)
 
-		var stdout string
-		for attempt := 0; attempt < 5; attempt++ {
-			stdout, _, err = executeCLI("get", saEmail, createdKeyID, "-f", "json")
-			if err == nil {
-				break
-			}
-			time.Sleep(1 * time.Second)
-		}
+		stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
 		if err != nil {
 			t.Fatalf("get disabled failed: %v", err)
 		}
@@ -346,23 +338,14 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 			t.Errorf("expected key to be disabled")
 		}
 
-		for attempt := 0; attempt < 5; attempt++ {
-			_, stderr, err = executeCLI("enable", saEmail, createdKeyID)
-			if err == nil {
-				break
-			}
-			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "NotFound") {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			break
-		}
+		_, stderr, err = executeCLI("enable", saEmail, createdKeyID)
 		if err != nil {
 			t.Fatalf("enable failed: %v\nstderr: %s", err, stderr)
 		}
+		waitForKeyStatus(t, ctx, iamClient, saEmail, createdKeyID, false)
 	})
 
-	// 5. Generate local 2048-bit key with custom validity
+	// 5. Generate local 2048-bit key with custom validity (dual-verified)
 	t.Run("5_GenerateLocalKey", func(t *testing.T) {
 		localCredsPath := filepath.Join(tmpDir, "local-creds.json")
 		stdout, stderr, err := executeCLI("generate", saEmail,
@@ -397,7 +380,7 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 7. Upload raw RSA public key with --wrap-rsa
+	// 7. Upload raw RSA public key with --wrap-rsa (dual-verified)
 	t.Run("7_UploadWrappedRSAPublicKey", func(t *testing.T) {
 		rawKey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
@@ -422,7 +405,7 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 8. Rotate keys (both local and gcp methods)
+	// 8. Rotate keys (both local and gcp methods, dual-verified)
 	t.Run("8_RotateKeys", func(t *testing.T) {
 		rotLocalPath := filepath.Join(tmpDir, "rot-local.json")
 		stdout, stderr, err := executeCLI("rotate", saEmail,
@@ -452,7 +435,7 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 9. Delete remaining keys
+	// 9. Delete remaining keys (with deletion verification barrier)
 	t.Run("9_DeleteRemainingKeys", func(t *testing.T) {
 		stdout, _, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
 		if err != nil {
@@ -464,6 +447,8 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 			_, stderr, err := executeCLI("delete", saEmail, k.ID)
 			if err != nil {
 				t.Logf("delete key %s warning: %v\nstderr: %s", k.ID, err, stderr)
+			} else {
+				waitForKeyDeleted(t, ctx, iamClient, saEmail, k.ID)
 			}
 		}
 	})
@@ -477,7 +462,7 @@ func TestLive_Policy_NoCreate(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	saEmail, cleanup := createEphemeralServiceAccount(t, ctx, cfg.NoCreateProject, cfg.RunnerID)
+	saEmail, _, cleanup := createEphemeralServiceAccount(t, ctx, cfg.NoCreateProject, cfg.RunnerID)
 	defer cleanup()
 
 	tmpDir := t.TempDir()
@@ -525,7 +510,7 @@ func TestLive_Policy_NoUpload(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	saEmail, cleanup := createEphemeralServiceAccount(t, ctx, cfg.NoUploadProject, cfg.RunnerID)
+	saEmail, _, cleanup := createEphemeralServiceAccount(t, ctx, cfg.NoUploadProject, cfg.RunnerID)
 	defer cleanup()
 
 	tmpDir := t.TempDir()
@@ -561,7 +546,7 @@ func TestLive_Policy_KeyExpiryHours(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	saEmail, cleanup := createEphemeralServiceAccount(t, ctx, cfg.ExpiryProject, cfg.RunnerID)
+	saEmail, _, cleanup := createEphemeralServiceAccount(t, ctx, cfg.ExpiryProject, cfg.RunnerID)
 	defer cleanup()
 
 	tmpDir := t.TempDir()

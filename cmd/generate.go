@@ -101,6 +101,10 @@ GCP organization policy constraints (e.g. constraints/iam.serviceAccountKeyExpir
 				}
 			}
 
+			if err := app.VerifyKeyReady(cmd.Context(), iamClient, saEmail, keyInfo.ID); err != nil {
+				return fmt.Errorf("key generated and uploaded but failed readiness verification: %w", err)
+			}
+
 			fmt.Fprintf(app.Out, "Successfully generated local RSA key and uploaded to GCP:\n")
 			fmt.Fprintf(app.Out, "  Key ID:          %s\n", keyInfo.ID)
 			fmt.Fprintf(app.Out, "  Validity:        %v\n", validity)

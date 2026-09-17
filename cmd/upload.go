@@ -105,6 +105,10 @@ automatically wrap the public key into an X.509 certificate.`,
 				return err
 			}
 
+			if err := app.VerifyKeyReady(cmd.Context(), iamClient, saEmail, keyInfo.ID); err != nil {
+				return fmt.Errorf("key uploaded but failed readiness verification: %w", err)
+			}
+
 			fmt.Fprintf(app.Out, "Successfully uploaded public key to service account %s:\n", saEmail)
 			fmt.Fprintf(app.Out, "  Key ID:       %s\n", keyInfo.ID)
 			fmt.Fprintf(app.Out, "  Resource:     %s\n", keyInfo.Name)
