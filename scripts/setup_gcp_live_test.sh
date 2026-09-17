@@ -128,13 +128,15 @@ apply_policy_safely() {
 # A. Standard Project: Ensure no restrictive policies are enforced
 apply_policy_safely "gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_STANDARD} && gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_STANDARD}" "standard project (unrestricted)"
 
-# B. No-Create Project: Enforce constraints/iam.disableServiceAccountKeyCreation
-apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_NO_CREATE}" "no-create project (disableServiceAccountKeyCreation)"
+# B. No-Create Project: Enforce constraints/iam.disableServiceAccountKeyCreation AND ensure upload is allowed
+apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_NO_CREATE} && gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_NO_CREATE}" "no-create project (disableServiceAccountKeyCreation)"
 
-# C. No-Upload Project: Enforce constraints/iam.disableServiceAccountKeyUpload
-apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_NO_UPLOAD}" "no-upload project (disableServiceAccountKeyUpload)"
+# C. No-Upload Project: Enforce constraints/iam.disableServiceAccountKeyUpload AND ensure creation is allowed
+apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_NO_UPLOAD} && gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_NO_UPLOAD}" "no-upload project (disableServiceAccountKeyUpload)"
 
-# D. Expiry-24h Project: Enforce constraints/iam.serviceAccountKeyExpiryHours = 24h
+# D. Expiry-24h Project: Ensure creation and upload are allowed, and enforce 24h key expiry
+apply_policy_safely "gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_EXPIRY} && gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_EXPIRY}" "expiry project base policies (allow create and upload)"
+
 TMP_POLICY_V1=$(mktemp)
 cat << POLICY_EOF > "${TMP_POLICY_V1}"
 constraint: constraints/iam.serviceAccountKeyExpiryHours

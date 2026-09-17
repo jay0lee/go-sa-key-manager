@@ -157,6 +157,7 @@ func detectPolicyViolation(msg string, err error) *PolicyViolationError {
 	// Check key creation constraint
 	if strings.Contains(msg, string(ConstraintDisableKeyCreation)) ||
 		(strings.Contains(lowerMsg, "disable") && strings.Contains(lowerMsg, "key creation")) ||
+		strings.Contains(lowerMsg, "key creation is not allowed") ||
 		strings.Contains(lowerMsg, "key creation is disabled by organization policy") {
 		return &PolicyViolationError{
 			Constraint:  ConstraintDisableKeyCreation,

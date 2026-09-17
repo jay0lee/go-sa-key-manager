@@ -144,8 +144,8 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 	// Explicitly verify zero user keys exist initially
 	revokeAllUserKeys(ctx, iamClient, sa.Name)
 
-	// Allow GCP IAM eventual consistency propagation
-	time.Sleep(3 * time.Second)
+	// Wait for newly created service account to propagate in IAM
+	waitForServiceAccountReady(t, ctx, iamClient, email)
 
 	cleanup := func() {
 		defer iamClient.Close()
@@ -161,6 +161,27 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 	}
 
 	return email, cleanup
+}
+
+// waitForServiceAccountReady polls IAM until the newly created service account is queryable.
+func waitForServiceAccountReady(t *testing.T, ctx context.Context, iamClient *admin.IamClient, saEmail string) {
+	t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	resourceName := "projects/-/serviceAccounts/" + saEmail
+	for time.Now().Before(deadline) {
+		_, err := iamClient.ListServiceAccountKeys(ctx, &adminpb.ListServiceAccountKeysRequest{
+			Name: resourceName,
+			KeyTypes: []adminpb.ListServiceAccountKeysRequest_KeyType{
+				adminpb.ListServiceAccountKeysRequest_USER_MANAGED,
+			},
+		})
+		if err == nil {
+			t.Logf("Service account %s is propagated and accessible via %s", saEmail, resourceName)
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Logf("Warning: timed out waiting for %s to propagate", saEmail)
 }
 
 func executeCLI(args ...string) (string, string, error) {
@@ -191,7 +212,19 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 	// 1. Create GCP-managed key
 	t.Run("1_CreateKey", func(t *testing.T) {
 		credsPath := filepath.Join(tmpDir, "gcp-managed.json")
-		stdout, stderr, err := executeCLI("create", saEmail, "-o", credsPath)
+		var stdout, stderr string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			stdout, stderr, err = executeCLI("create", saEmail, "-o", credsPath)
+			if err == nil {
+				break
+			}
+			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "PermissionDenied") {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			break
+		}
 		if err != nil {
 			t.Fatalf("create failed: %v\nstderr: %s", err, stderr)
 		}

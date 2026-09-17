@@ -99,6 +99,13 @@ func TestWrapGCPError_GRPCStatus(t *testing.T) {
 			expectedRemediation: "Use local key generation",
 		},
 		{
+			name:                "Policy violation - key creation is not allowed",
+			st:                  status.New(codes.FailedPrecondition, "Key creation is not allowed on this service account."),
+			isPolicyViolation:   true,
+			expectedConstraint:  ConstraintDisableKeyCreation,
+			expectedRemediation: "Use local key generation",
+		},
+		{
 			name:                "Policy violation - disable key upload constraint string",
 			st:                  status.New(codes.FailedPrecondition, "operation violates constraints/iam.disableServiceAccountKeyUpload"),
 			isPolicyViolation:   true,

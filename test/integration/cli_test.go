@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // getBinaryPath returns the path to the compiled gcp-sa-key-manager binary.
@@ -66,10 +67,23 @@ func TestLive_CLI_BinaryExecution(t *testing.T) {
 	// 2. Create key via binary subprocess
 	t.Run("CLI_CreateKey", func(t *testing.T) {
 		credsPath := filepath.Join(tmpDir, "cli-creds.json")
-		cmd := exec.Command(binPath, "create", saEmail, "-o", credsPath)
+		var out []byte
 		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			stderr.Reset()
+			cmd := exec.Command(binPath, "create", saEmail, "-o", credsPath)
+			cmd.Stderr = &stderr
+			out, err = cmd.Output()
+			if err == nil {
+				break
+			}
+			if strings.Contains(stderr.String(), "does not exist") || strings.Contains(stderr.String(), "PermissionDenied") {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			break
+		}
 		if err != nil {
 			t.Fatalf("cli create failed: %v\nstderr: %s", err, stderr.String())
 		}
