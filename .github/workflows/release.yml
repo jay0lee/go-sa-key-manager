@@ -218,7 +218,7 @@ jobs:
       - name: Generate Checksums
         run: |
           cd dist
-          sha256sum gcp-sa-key-manager-* > checksums.txt
+          sha256sum gcp-sa-key-manager-*.tar.bz2 gcp-sa-key-manager-*.zip > checksums.txt
           cat checksums.txt
 
       - name: Attest Build Provenance for Binaries and Packages
@@ -232,7 +232,10 @@ jobs:
           tag_name: ${{ needs.version.outputs.version }}
           name: Release ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          files: dist/*
+          files: |
+            dist/*.tar.bz2
+            dist/*.zip
+            dist/checksums.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
