@@ -5,7 +5,7 @@ BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS=-ldflags "-s -w -X github.com/jay0lee/go-sa-key-manager/cmd.Version=$(VERSION) -X github.com/jay0lee/go-sa-key-manager/cmd.GitCommit=$(COMMIT) -X github.com/jay0lee/go-sa-key-manager/cmd.BuildDate=$(BUILD_DATE)"
 DARWIN_LDFLAGS=-ldflags "-s -w -macos 11.0 -X github.com/jay0lee/go-sa-key-manager/cmd.Version=$(VERSION) -X github.com/jay0lee/go-sa-key-manager/cmd.GitCommit=$(COMMIT) -X github.com/jay0lee/go-sa-key-manager/cmd.BuildDate=$(BUILD_DATE)"
 
-.PHONY: all build test coverage lint clean build-all
+.PHONY: all build test test-live coverage lint clean build-all
 
 all: build
 
@@ -14,6 +14,9 @@ build:
 
 test:
 	go test -v -race ./...
+
+test-live: build
+	go test -v -tags=live ./test/integration/...
 
 coverage:
 	go test -v -coverprofile=coverage.out ./...

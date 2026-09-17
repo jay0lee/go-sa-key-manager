@@ -217,12 +217,63 @@ This project uses GitHub Actions workflows for automated testing and releases:
 
 - **Continuous Integration (`.github/workflows/test.yml`)**:
   - Runs on every push and pull request to `main`.
-  - Matrix testing with race detector on `ubuntu-latest`, `macos-latest` (Apple Silicon arm64), and `windows-latest`.
+  - Matrix testing on **100% native architecture runners**: `ubuntu-latest` (Linux x86_64), `ubuntu-24.04-arm` (Linux ARM64), `macos-latest` (Apple Silicon ARM64), `windows-latest` (Windows x86_64), and `windows-11-arm` (Windows ARM64).
   - Enforces 100.0% statement coverage check on Linux.
 
 - **Releases (`.github/workflows/release.yml`)**:
   - Uses date/time based versioning (`vYYYY.MM.DD.HHMM`, e.g. `v2026.09.17.1015`).
-  - Automatically compiles release binaries on native hosted runners (`ubuntu-latest`, `macos-latest` [Apple Silicon arm64], and `windows-latest`).
-  - Excludes macOS Intel (`x86_64`) runners and binaries.
+  - Compiles release binaries on native hosted runners (`ubuntu-latest`, `ubuntu-24.04-arm`, `macos-latest` [Apple Silicon arm64], `windows-latest`, `windows-11-arm`).
+  - Strictly excludes macOS Intel (`x86_64`) runners and binaries.
   - Generates SHA-256 `checksums.txt` and publishes artifacts to GitHub Releases.
-  - Can be triggered manually via `workflow_dispatch` or by pushing a `v*` tag.
+
+- **Live GCP Integration Testing (`.github/workflows/live-test.yml`)**:
+  - Fully exercises `gcp-sa-key-manager` commands against live Google Cloud Platform resources.
+  - Runs concurrently across all 5 native hardware runners using per-runner Service Accounts authenticated via Workload Identity Federation (WIF).
+  - Tests against 4 consolidated policy projects representing baseline and restricted states.
+
+---
+
+## Live GCP Testing & Setup
+
+### 1. Automated GCP Infrastructure Setup
+To provision the GCP folder, consolidated policy projects, per-runner Service Accounts, and Workload Identity Federation:
+
+```bash
+# Using an Organization ID:
+ORGANIZATION_ID="123456789012" \
+BILLING_ACCOUNT_ID="012345-6789AB-CDEF01" \
+./scripts/setup_gcp_live_test.sh
+
+# Or using a parent Folder ID:
+PARENT_FOLDER_ID="987654321098" \
+BILLING_ACCOUNT_ID="012345-6789AB-CDEF01" \
+./scripts/setup_gcp_live_test.sh
+```
+
+The script automatically provisions:
+1. **Dedicated Test Folder**: `sa-key-manager-ci`
+2. **4 Consolidated Policy Projects**:
+   - `prj-std-*`: Baseline unrestricted project.
+   - `prj-noc-*`: Enforces `constraints/iam.disableServiceAccountKeyCreation`.
+   - `prj-nou-*`: Enforces `constraints/iam.disableServiceAccountKeyUpload`.
+   - `prj-exp-*`: Enforces `constraints/iam.serviceAccountKeyExpiryHours = 24h`.
+3. **5 Dedicated Runner Service Accounts**:
+   - `sa-ci-linux-amd64`
+   - `sa-ci-linux-arm64`
+   - `sa-ci-macos-arm64`
+   - `sa-ci-windows-amd64`
+   - `sa-ci-windows-arm64`
+4. **Workload Identity Federation**: Configured pool and provider granting GitHub repository impersonation rights.
+
+### 2. Running Live Tests Locally
+Once authenticated to GCP via Application Default Credentials:
+
+```bash
+export GCP_PROJECT_STANDARD="your-standard-project-id"
+export GCP_PROJECT_NO_CREATE="your-no-create-project-id"
+export GCP_PROJECT_NO_UPLOAD="your-no-upload-project-id"
+export GCP_PROJECT_EXPIRY_24H="your-expiry-project-id"
+
+make test-live
+```
+
