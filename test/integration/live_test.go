@@ -371,8 +371,17 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 				lastOut = stdout
 				var parsed []client.KeyInfo
 				if jsonErr := json.Unmarshal([]byte(stdout), &parsed); jsonErr == nil && len(parsed) > 0 {
-					if createdKeyID == "" || parsed[0].ID == createdKeyID {
+					if createdKeyID == "" {
 						keys = parsed
+						break
+					}
+					for _, k := range parsed {
+						if k.ID == createdKeyID {
+							keys = parsed
+							break
+						}
+					}
+					if keys != nil {
 						break
 					}
 				}
@@ -380,7 +389,7 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 			time.Sleep(500 * time.Millisecond)
 		}
 		if len(keys) == 0 {
-			t.Fatalf("expected at least 1 user key in list index, found 0 (last output: %s)", lastOut)
+			t.Fatalf("expected key %s in list index, found none (last output: %s)", createdKeyID, lastOut)
 		}
 		if createdKeyID == "" {
 			createdKeyID = keys[0].ID

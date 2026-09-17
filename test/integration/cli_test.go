@@ -4,12 +4,15 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/jay0lee/go-sa-key-manager/pkg/client"
 )
 
 // getBinaryPath returns the path to the compiled gcp-sa-key-manager binary.
@@ -91,6 +94,21 @@ func TestLive_CLI_BinaryExecution(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "KEY ID") {
 			t.Errorf("expected table header in output: %s", out)
+		}
+	})
+
+	// 4. Delete keys created during CLI binary execution test
+	t.Run("CLI_DeleteKey", func(t *testing.T) {
+		cmdList := exec.Command(binPath, "list", saEmail, "--type", "user", "-f", "json")
+		listOut, err := cmdList.CombinedOutput()
+		if err == nil {
+			var userKeys []client.KeyInfo
+			if json.Unmarshal(listOut, &userKeys) == nil {
+				for _, k := range userKeys {
+					delCmd := exec.Command(binPath, "delete", saEmail, k.ID)
+					_ = delCmd.Run()
+				}
+			}
 		}
 	})
 }
