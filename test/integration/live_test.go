@@ -275,13 +275,25 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		t.Logf("Found key ID: %s", createdKeyID)
 	})
 
-	// 3. Get key details and extract public key
+	// 3. Get key details and extract public key (with retry for key replication)
 	t.Run("3_GetKey", func(t *testing.T) {
 		if createdKeyID == "" {
 			t.Skip("createdKeyID not found")
 		}
 		pubKeyPath := filepath.Join(tmpDir, "key.pem")
-		stdout, stderr, err := executeCLI("get", saEmail, createdKeyID, "--public-key", "-o", pubKeyPath)
+		var stdout, stderr string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			stdout, stderr, err = executeCLI("get", saEmail, createdKeyID, "--public-key", "-o", pubKeyPath)
+			if err == nil {
+				break
+			}
+			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "NotFound") {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
 		if err != nil {
 			t.Fatalf("get failed: %v\nstderr: %s", err, stderr)
 		}
@@ -298,12 +310,31 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		if createdKeyID == "" {
 			t.Skip("createdKeyID not found")
 		}
-		_, stderr, err := executeCLI("disable", saEmail, createdKeyID)
+		var stderr string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			_, stderr, err = executeCLI("disable", saEmail, createdKeyID)
+			if err == nil {
+				break
+			}
+			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "NotFound") {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
 		if err != nil {
 			t.Fatalf("disable failed: %v\nstderr: %s", err, stderr)
 		}
 
-		stdout, _, err := executeCLI("get", saEmail, createdKeyID, "-f", "json")
+		var stdout string
+		for attempt := 0; attempt < 5; attempt++ {
+			stdout, _, err = executeCLI("get", saEmail, createdKeyID, "-f", "json")
+			if err == nil {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
 		if err != nil {
 			t.Fatalf("get disabled failed: %v", err)
 		}
@@ -315,7 +346,17 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 			t.Errorf("expected key to be disabled")
 		}
 
-		_, stderr, err = executeCLI("enable", saEmail, createdKeyID)
+		for attempt := 0; attempt < 5; attempt++ {
+			_, stderr, err = executeCLI("enable", saEmail, createdKeyID)
+			if err == nil {
+				break
+			}
+			if strings.Contains(stderr, "does not exist") || strings.Contains(stderr, "NotFound") {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
 		if err != nil {
 			t.Fatalf("enable failed: %v\nstderr: %s", err, stderr)
 		}
