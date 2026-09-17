@@ -135,8 +135,16 @@ apply_policy_safely "gcloud resource-manager org-policies enable-enforce constra
 apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_NO_UPLOAD}" "no-upload project (disableServiceAccountKeyUpload)"
 
 # D. Expiry-24h Project: Enforce constraints/iam.serviceAccountKeyExpiryHours = 24h
-TMP_POLICY_FILE=$(mktemp)
-cat << POLICY_EOF > "${TMP_POLICY_FILE}"
+TMP_POLICY_V1=$(mktemp)
+cat << POLICY_EOF > "${TMP_POLICY_V1}"
+constraint: constraints/iam.serviceAccountKeyExpiryHours
+listPolicy:
+  allowedValues:
+  - "24h"
+POLICY_EOF
+
+TMP_POLICY_V2=$(mktemp)
+cat << POLICY_EOF > "${TMP_POLICY_V2}"
 name: projects/${PROJ_EXPIRY}/policies/constraints/iam.serviceAccountKeyExpiryHours
 spec:
   rules:
@@ -146,8 +154,8 @@ spec:
   inheritFromParent: false
 POLICY_EOF
 
-apply_policy_safely "gcloud resource-manager org-policies set-policy ${TMP_POLICY_FILE} --project=${PROJ_EXPIRY}" "expiry project (serviceAccountKeyExpiryHours=24h)"
-rm -f "${TMP_POLICY_FILE}"
+apply_policy_safely "gcloud resource-manager org-policies set-policy ${TMP_POLICY_V1} --project=${PROJ_EXPIRY} || gcloud org-policies set-policy ${TMP_POLICY_V2}" "expiry project (serviceAccountKeyExpiryHours=24h)"
+rm -f "${TMP_POLICY_V1}" "${TMP_POLICY_V2}"
 
 # ------------------------------------------------------------------------------
 # 4. Create Per-Runner Service Accounts in Identity Project (PROJ_STANDARD)
@@ -162,12 +170,9 @@ RUNNER_NAMES=(
   "windows-arm64"
 )
 
-declare -A RUNNER_EMAILS
-
 for RUNNER in "${RUNNER_NAMES[@]}"; do
   SA_NAME="sa-ci-${RUNNER}"
   SA_EMAIL="${SA_NAME}@${PROJ_STANDARD}.iam.gserviceaccount.com"
-  RUNNER_EMAILS["${RUNNER}"]="${SA_EMAIL}"
 
   if gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJ_STANDARD}" &>/dev/null; then
     echo "Service Account ${SA_NAME} already exists."
@@ -233,7 +238,7 @@ WIF_PROVIDER_RESOURCE="projects/${PROJ_NUMBER}/locations/global/workloadIdentity
 echo -e "WIF Provider Resource: ${WIF_PROVIDER_RESOURCE}"
 
 for RUNNER in "${RUNNER_NAMES[@]}"; do
-  SA_EMAIL="${RUNNER_EMAILS[${RUNNER}]}"
+  SA_EMAIL="sa-ci-${RUNNER}@${PROJ_STANDARD}.iam.gserviceaccount.com"
   echo "Authorizing GitHub repo ${GITHUB_REPO} to impersonate ${SA_EMAIL}..."
   gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
     --project="${PROJ_STANDARD}" \
@@ -257,11 +262,10 @@ echo "GCP_PROJECT_STANDARD=${PROJ_STANDARD}"
 echo "GCP_PROJECT_NO_CREATE=${PROJ_NO_CREATE}"
 echo "GCP_PROJECT_NO_UPLOAD=${PROJ_NO_UPLOAD}"
 echo "GCP_PROJECT_EXPIRY_24H=${PROJ_EXPIRY}"
-echo "GCP_SA_LINUX_AMD64=${RUNNER_EMAILS[linux-amd64]}"
-echo "GCP_SA_LINUX_ARM64=${RUNNER_EMAILS[linux-arm64]}"
-echo "GCP_SA_MACOS_ARM64=${RUNNER_EMAILS[macos-arm64]}"
-echo "GCP_SA_WINDOWS_AMD64=${RUNNER_EMAILS[windows-amd64]}"
-echo "GCP_SA_WINDOWS_ARM64=${RUNNER_EMAILS[windows-arm64]}"
+for RUNNER in "${RUNNER_NAMES[@]}"; do
+  VAR_NAME="GCP_SA_$(echo "${RUNNER}" | tr '[:lower:]-' '[:upper:]_')"
+  echo "${VAR_NAME}=sa-ci-${RUNNER}@${PROJ_STANDARD}.iam.gserviceaccount.com"
+done
 echo "------------------------------------------------------------------"
 
 echo -e "\nTo clean up these test projects in the future, run:"
