@@ -105,6 +105,15 @@ func TestCreateSelfSignedCertificate(t *testing.T) {
 	if cert.Subject.CommonName != "service-account-key" {
 		t.Fatalf("expected default commonName, got %q", cert.Subject.CommonName)
 	}
+	// Verify NotBefore is backdated 5 minutes for clock skew tolerance
+	if cert.NotBefore.After(time.Now().Add(-4 * time.Minute)) || cert.NotBefore.Before(time.Now().Add(-6 * time.Minute)) {
+		t.Errorf("expected NotBefore ~5m in past, got %v", cert.NotBefore)
+	}
+	// Verify NotAfter provides the full requested validity duration from creation
+	remaining := time.Until(cert.NotAfter)
+	if remaining < 23*time.Hour+58*time.Minute || remaining > 24*time.Hour+1*time.Minute {
+		t.Errorf("expected remaining validity ~24h, got %v", remaining)
+	}
 
 	// Custom common name
 	certPEM2, err := CreateSelfSignedCertificate(priv, 48*time.Hour, "custom-sa-key")
@@ -266,6 +275,15 @@ func TestWrapRSAPublicKeyInCert(t *testing.T) {
 	cert1, err := ParseCertificate(certPEM1)
 	if err != nil || cert1.Subject.CommonName != "service-account-key" {
 		t.Fatalf("expected default commonName, got %v", cert1)
+	}
+	// Verify NotBefore is backdated 5 minutes for clock skew tolerance
+	if cert1.NotBefore.After(time.Now().Add(-4 * time.Minute)) || cert1.NotBefore.Before(time.Now().Add(-6 * time.Minute)) {
+		t.Errorf("expected NotBefore ~5m in past, got %v", cert1.NotBefore)
+	}
+	// Verify NotAfter provides the full requested validity duration from creation
+	remaining1 := time.Until(cert1.NotAfter)
+	if remaining1 < 23*time.Hour+58*time.Minute || remaining1 > 24*time.Hour+1*time.Minute {
+		t.Errorf("expected remaining validity ~24h, got %v", remaining1)
 	}
 
 	// Custom commonName

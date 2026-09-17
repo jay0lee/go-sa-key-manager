@@ -77,8 +77,9 @@ func CreateSelfSignedCertificate(priv *rsa.PrivateKey, validity time.Duration, c
 		return nil, fmt.Errorf("failed to generate certificate serial number: %w", err)
 	}
 
-	notBefore := time.Now().Add(-5 * time.Minute) // 5 min skew tolerance
-	notAfter := notBefore.Add(validity)
+	now := time.Now()
+	notBefore := now.Add(-5 * time.Minute) // 5 min skew tolerance
+	notAfter := now.Add(validity)          // Key remains valid for the full specified period from creation
 
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
