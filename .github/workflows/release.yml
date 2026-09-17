@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v2026.09.17.1200). Defaults to UTC date/time tag.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Determine Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Compute release version
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VER="${{ github.ref_name }}"
+          else
+            VER="v$(date -u +'%Y.%m.%d.%H%M')"
+          fi
+          echo "Release version: $VER"
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: [version]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 and ARM64 built on ubuntu-latest
+          - runner: ubuntu-latest
+            platform: linux
+          # macOS Apple Silicon (ARM64 only; Intel x86_64 explicitly excluded)
+          - runner: macos-latest
+            platform: macos
+          # Windows x86_64 and ARM64 built on windows-latest
+          - runner: windows-latest
+            platform: windows
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build binaries (${{ matrix.platform }})
+        shell: bash
+        run: |
+          mkdir -p dist
+          VER="${{ needs.version.outputs.version }}"
+          COMMIT="${{ github.sha }}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          COMMON_LDFLAGS="-s -w -X github.com/jay0lee/go-sa-key-manager/cmd.Version=${VER} -X github.com/jay0lee/go-sa-key-manager/cmd.GitCommit=${COMMIT:0:7} -X github.com/jay0lee/go-sa-key-manager/cmd.BuildDate=${BUILD_DATE}"
+
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            echo "Building Linux amd64..."
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-linux-amd64 main.go
+            echo "Building Linux arm64..."
+            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-linux-arm64 main.go
+          elif [ "${{ matrix.platform }}" = "macos" ]; then
+            echo "Building macOS Apple Silicon (arm64)..."
+            # Explicitly target macOS 11.0 (earliest Apple Silicon release) for maximum backward compatibility
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-macos 11.0 ${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-darwin-arm64 main.go
+          elif [ "${{ matrix.platform }}" = "windows" ]; then
+            echo "Building Windows amd64..."
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-windows-amd64.exe main.go
+            echo "Building Windows arm64..."
+            CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-windows-arm64.exe main.go
+          fi
+
+          ls -la dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate Checksums
+        run: |
+          cd dist
+          sha256sum gcp-sa-key-manager-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          name: Release ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

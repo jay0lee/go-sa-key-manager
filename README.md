@@ -1,1 +1,228 @@
-# go-sa-key-manager
+# GCP Service Account Key Manager & Rotation Tool (`gcp-sa-key-manager`)
+
+A high-security, zero-dependency, cross-platform CLI application written in Go for managing the full lifecycle and rotation of Google Cloud Platform (GCP) Service Account keys.
+
+The tool provides automated key rotation, local cryptographic key generation, support for Hardware Security Module (HSM) public key uploads, compliance with GCP Organization Policies, and **100% automated test coverage**.
+
+---
+
+## Key Features
+
+1. **GCP Authentication via ADC**: Native Application Default Credentials support via Google's official Go SDK (`cloud.google.com/go/iam/admin/apiv1`), supporting `gcloud auth application-default login`, GCE/GKE metadata server, and service account key files via `--credentials-file`.
+2. **Basic & Advanced CRUD Operations**:
+   - `list`: List user-managed and system-managed keys with statuses and remaining validity.
+   - `get`: Inspect metadata or extract public keys.
+   - `create`: Provision GCP-managed key pairs and download credentials JSON.
+   - `delete`: Permanently delete keys.
+   - `disable` / `enable`: Temporarily disable active keys for safe deprecation and re-enable if needed.
+3. **Local Key Generation (`generate`)**: Generate RSA private keys (1024 [legacy/insecure with warning], 2048, 3072, 4096-bit) locally on your device. The private key never leaves your system. The tool automatically wraps the public key in a self-signed X.509 v3 certificate, uploads it to GCP IAM, and outputs a ready-to-use Google Service Account credentials JSON file.
+4. **HSM & Pre-Existing Key Upload (`upload`)**: Upload public keys or X.509 certificates generated inside an HSM (Hardware Security Module), TPM, or external PKI. Supports automatically wrapping raw RSA public keys in an X.509 certificate via `--wrap-rsa`.
+5. **Automated Key Rotation (`rotate`)**: Executes seamless end-to-end rotation:
+   - Discovers existing active keys.
+   - Creates a new key (either locally or GCP-managed).
+   - Generates updated credentials.
+   - Transitions old keys according to your policy (`--disable-old`, `--delete-old`, or `--keep-old` for transition grace periods).
+6. **GCP Organization Policy Aware**:
+   - Manages and customizes validity periods (`--validity`, `--validity-days`, `--validity-hours`) to comply with `constraints/iam.serviceAccountKeyExpiryHours`.
+   - Catches and gracefully explains policy violations such as `constraints/iam.disableServiceAccountKeyCreation` and `constraints/iam.disableServiceAccountKeyUpload` with actionable remediation guidance.
+7. **Zero Dependencies & Multi-Platform**: Compiled with `CGO_ENABLED=0` into static binaries for **macOS** (Apple Silicon ARM64), **Linux** (x86_64 and ARM64), and **Windows** (x64 and ARM64). *Note: Intel Mac (x86_64) is intentionally not maintained.*
+8. **100% Test Coverage**: Complete test coverage across all packages, branches, and error handlers.
+
+---
+
+## Installation & Building
+
+### Prerequisites
+- Go 1.22+ (tested with Go 1.27)
+- Authenticated GCP environment with permissions to manage Service Account keys (`roles/iam.serviceAccountKeyAdmin` or `roles/owner`).
+
+### Building from Source
+
+Build the binary for your current machine:
+```bash
+make build
+```
+The binary will be placed at `bin/gcp-sa-key-manager`.
+
+### Multi-Platform Cross-Compilation
+
+To generate static binaries for macOS (Apple Silicon), Linux, and Windows without external C libraries:
+```bash
+make build-all
+```
+This produces:
+- `bin/gcp-sa-key-manager-darwin-arm64` (macOS Apple Silicon)
+- `bin/gcp-sa-key-manager-linux-amd64` (Linux x86_64)
+- `bin/gcp-sa-key-manager-linux-arm64` (Linux ARM64)
+- `bin/gcp-sa-key-manager-windows-amd64.exe` (Windows x64)
+- `bin/gcp-sa-key-manager-windows-arm64.exe` (Windows ARM64)
+
+---
+
+## Authentication
+
+The CLI uses Google Cloud Application Default Credentials (ADC) by default. To authenticate locally:
+
+```bash
+gcloud auth application-default login
+```
+
+Alternatively, you can provide an explicit credentials JSON file using the global `--credentials-file` / `-c` flag:
+```bash
+./bin/gcp-sa-key-manager list sa@project.iam.gserviceaccount.com -c /path/to/credentials.json
+```
+
+---
+
+## CLI Command Reference & Examples
+
+### 1. List Keys
+List all keys associated with a service account:
+```bash
+# List all keys (table format)
+./bin/gcp-sa-key-manager list my-service-account@my-project.iam.gserviceaccount.com
+
+# List only user-managed keys in JSON format
+./bin/gcp-sa-key-manager list my-service-account@my-project.iam.gserviceaccount.com --type user -f json
+```
+
+### 2. Get Key Details
+View key metadata or extract the public key:
+```bash
+# View metadata
+./bin/gcp-sa-key-manager get my-service-account@my-project.iam.gserviceaccount.com <KEY_ID>
+
+# Save public key to a PEM file
+./bin/gcp-sa-key-manager get my-service-account@my-project.iam.gserviceaccount.com <KEY_ID> --public-key -o public-key.pem
+```
+
+### 3. Create GCP-Managed Key Pair
+Create a key pair generated by Google Cloud and save the private credentials JSON:
+```bash
+./bin/gcp-sa-key-manager create my-service-account@my-project.iam.gserviceaccount.com -o sa-credentials.json
+```
+
+### 4. Generate Key Locally (Recommended for Maximum Security)
+Generate the RSA private key locally so the private key material never touches Google servers:
+```bash
+# Generate 2048-bit key valid for 30 days
+./bin/gcp-sa-key-manager generate my-service-account@my-project.iam.gserviceaccount.com \
+    --validity-days 30 \
+    --out-credentials my-sa-creds.json \
+    --out-key my-sa-private.pem \
+    --out-cert my-sa-cert.pem
+
+# Comply with strict organization policy (e.g. 24-hour max lifespan)
+./bin/gcp-sa-key-manager generate my-service-account@my-project.iam.gserviceaccount.com \
+    --validity-hours 24 \
+    -o my-sa-creds.json
+
+# 1024-bit key generation (allowed for legacy compatibility, but issues a security warning)
+./bin/gcp-sa-key-manager generate my-service-account@my-project.iam.gserviceaccount.com \
+    --bits 1024 \
+    -o my-sa-creds.json
+```
+
+### 5. Upload HSM / Pre-Existing Keys
+Upload a public key or certificate from an HSM or local certificate store:
+```bash
+# Upload an existing X.509 certificate (.pem or .crt)
+./bin/gcp-sa-key-manager upload my-service-account@my-project.iam.gserviceaccount.com /path/to/hsm-cert.pem
+
+# Upload a raw RSA public key from an HSM (automatically wraps in X.509 cert)
+./bin/gcp-sa-key-manager upload my-service-account@my-project.iam.gserviceaccount.com /path/to/hsm-public-key.pem \
+    --wrap-rsa \
+    --wrap-validity 720h
+```
+
+### 6. Disable and Enable Keys
+Safely stage key deprecation before permanent deletion:
+```bash
+# Disable a key (immediately blocks authentication with this key)
+./bin/gcp-sa-key-manager disable my-service-account@my-project.iam.gserviceaccount.com <KEY_ID>
+
+# Re-enable if needed
+./bin/gcp-sa-key-manager enable my-service-account@my-project.iam.gserviceaccount.com <KEY_ID>
+```
+
+### 7. Delete Keys
+Permanently delete an unused or compromised key:
+```bash
+./bin/gcp-sa-key-manager delete my-service-account@my-project.iam.gserviceaccount.com <KEY_ID>
+```
+
+### 8. Key Rotation Workflow (`rotate`)
+Automate key rotation in a single command:
+```bash
+# Standard rotation: generate local key, keep old keys active for grace period
+./bin/gcp-sa-key-manager rotate my-service-account@my-project.iam.gserviceaccount.com \
+    --validity 720h \
+    -o new-credentials.json
+
+# Zero-trust rotation: disable previously active keys immediately
+./bin/gcp-sa-key-manager rotate my-service-account@my-project.iam.gserviceaccount.com \
+    --disable-old \
+    -o new-credentials.json
+
+# Immediate cutover: permanently delete previous keys
+./bin/gcp-sa-key-manager rotate my-service-account@my-project.iam.gserviceaccount.com \
+    --delete-old \
+    -o new-credentials.json
+```
+
+---
+
+## Organization Policy Error Handling
+
+When organization policies restrict key management, `gcp-sa-key-manager` identifies the violation and provides clear remediation:
+
+| Policy Constraint | Behavior | CLI Guidance |
+| :--- | :--- | :--- |
+| `constraints/iam.disableServiceAccountKeyCreation` | GCP-managed key creation is blocked. | Recommends using `generate` to upload local public keys or `upload` for HSM keys. |
+| `constraints/iam.disableServiceAccountKeyUpload` | User-managed key upload is blocked. | Recommends using `create` (GCP-managed) or Workload Identity Federation. |
+| `constraints/iam.serviceAccountKeyExpiryHours` | Key validity exceeds organizational limit. | Displays allowed duration and prompts using `--validity` / `--validity-hours` with a compliant lifespan. |
+| Missing IAM permissions | `iam.serviceAccountKeys.*` denied. | Details required role (`roles/iam.serviceAccountKeyAdmin`). |
+| Missing ADC credentials | ADC not found in environment. | Instructs user to run `gcloud auth application-default login`. |
+
+---
+
+## Testing & 100% Coverage
+
+Run the automated test suite:
+```bash
+make test
+```
+
+Run test coverage analysis:
+```bash
+make coverage
+```
+
+Expected output:
+```
+ok  	github.com/jay0lee/go-sa-key-manager	coverage: 100.0% of statements
+ok  	github.com/jay0lee/go-sa-key-manager/cmd	coverage: 100.0% of statements
+ok  	github.com/jay0lee/go-sa-key-manager/pkg/client	coverage: 100.0% of statements
+ok  	github.com/jay0lee/go-sa-key-manager/pkg/crypto	coverage: 100.0% of statements
+ok  	github.com/jay0lee/go-sa-key-manager/pkg/errors	coverage: 100.0% of statements
+ok  	github.com/jay0lee/go-sa-key-manager/pkg/output	coverage: 100.0% of statements
+total:								(statements)	100.0%
+```
+
+---
+
+## Continuous Integration & Release Pipelines
+
+This project uses GitHub Actions workflows for automated testing and releases:
+
+- **Continuous Integration (`.github/workflows/test.yml`)**:
+  - Runs on every push and pull request to `main`.
+  - Matrix testing with race detector on `ubuntu-latest`, `macos-latest` (Apple Silicon arm64), and `windows-latest`.
+  - Enforces 100.0% statement coverage check on Linux.
+
+- **Releases (`.github/workflows/release.yml`)**:
+  - Uses date/time based versioning (`vYYYY.MM.DD.HHMM`, e.g. `v2026.09.17.1015`).
+  - Automatically compiles release binaries on native hosted runners (`ubuntu-latest`, `macos-latest` [Apple Silicon arm64], and `windows-latest`).
+  - Excludes macOS Intel (`x86_64`) runners and binaries.
+  - Generates SHA-256 `checksums.txt` and publishes artifacts to GitHub Releases.
+  - Can be triggered manually via `workflow_dispatch` or by pushing a `v*` tag.
