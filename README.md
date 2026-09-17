@@ -170,6 +170,24 @@ Automate key rotation in a single command:
     -o new-credentials.json
 ```
 
+### 9. Global Flags & HTTP Wire Debugging
+
+`gcp-sa-key-manager` provides global flags for output formatting and full HTTP wire inspection:
+
+- `-v, --verbose`: Enables verbose logging, printing full HTTP requests and responses to `stderr`.
+- `--debug-http`: Explicit flag to log full HTTP request and response wire traffic to `stderr`.
+- `--show-tokens`: Shows unmasked access tokens in HTTP wire logs (tokens are masked with `[MASKED]` by default).
+- `-f, --format`: Sets output format (`table`, `json`, `yaml`).
+- `-c, --credentials-file`: Explicit path to GCP credentials JSON (defaults to ADC).
+
+```bash
+# View full HTTP conversation with tokens masked by default
+./bin/gcp-sa-key-manager list my-sa@my-project.iam.gserviceaccount.com --verbose
+
+# Pipeline JSON output to jq while viewing HTTP traffic on stderr
+./bin/gcp-sa-key-manager list my-sa@my-project.iam.gserviceaccount.com -f json --verbose | jq .
+```
+
 ---
 
 ## Organization Policy Error Handling

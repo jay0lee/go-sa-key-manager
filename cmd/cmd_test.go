@@ -99,6 +99,15 @@ func TestNewDefaultAppAndRoot(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = app.VerifyKeyReady(canceledCtx, client.NewMockIAMClient(), "sa@proj", "key-1")
+
+	// Test with Verbose and ShowTokens enabled
+	app.Verbose = true
+	app.ShowTokens = true
+	c2, _ := app.ClientFactory(context.Background(), "")
+	if c2 != nil {
+		_ = c2.Close()
+	}
+	_ = app.VerifyKeyReady(canceledCtx, client.NewMockIAMClient(), "sa@proj", "key-1")
 }
 
 func TestParseValidityDuration(t *testing.T) {
@@ -836,9 +845,31 @@ func TestRotateCommand(t *testing.T) {
 		t.Fatalf("unexpected rotate local stdout error: %v", err)
 	}
 
-	// Success with gcp method and --delete-old
-	if err := executeCommand(env.app, "rotate", sa, "--method", "gcp", "--delete-old"); err != nil {
+	// Add expired and disabled keys
+	env.mockClient.AddKey(sa, &client.KeyInfo{
+		ID:              "old-expired-key",
+		KeyType:         client.KeyTypeUserManaged,
+		Disabled:        false,
+		ValidBeforeTime: now.Add(-1 * time.Hour),
+	})
+	env.mockClient.AddKey(sa, &client.KeyInfo{
+		ID:              "old-disabled-key",
+		KeyType:         client.KeyTypeUserManaged,
+		Disabled:        true,
+		ValidBeforeTime: now.Add(24 * time.Hour),
+	})
+
+	// Success with gcp method and --delete-old (should delete active, expired, and disabled keys)
+	if err := executeCommand(env.app, "rotate", sa, "--method", "gcp", "--delete-old", "--verbose", "--debug-http", "--show-tokens"); err != nil {
 		t.Fatalf("unexpected rotate gcp delete-old error: %v", err)
+	}
+
+	// Verify old keys were deleted
+	if _, err := env.mockClient.GetKey(context.Background(), sa, "old-expired-key"); err == nil {
+		t.Fatalf("expected old-expired-key to be deleted")
+	}
+	if _, err := env.mockClient.GetKey(context.Background(), sa, "old-disabled-key"); err == nil {
+		t.Fatalf("expected old-disabled-key to be deleted")
 	}
 
 	// Re-add active key and test --disable-old with JSON format

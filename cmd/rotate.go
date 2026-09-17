@@ -68,9 +68,13 @@ func newRotateCmd(app *App) *cobra.Command {
 				return err
 			}
 
-			var activeOldKeyIDs []string
+			var (
+				allOldKeyIDs    []string
+				activeOldKeyIDs []string
+			)
 			now := time.Now()
 			for _, k := range existingKeys {
+				allOldKeyIDs = append(allOldKeyIDs, k.ID)
 				if !k.Disabled && now.Before(k.ValidBeforeTime) {
 					activeOldKeyIDs = append(activeOldKeyIDs, k.ID)
 				}
@@ -162,7 +166,7 @@ func newRotateCmd(app *App) *cobra.Command {
 			}
 
 			if deleteOld {
-				for _, oldID := range activeOldKeyIDs {
+				for _, oldID := range allOldKeyIDs {
 					if err := iamClient.DeleteKey(cmd.Context(), saEmail, oldID); err != nil {
 						return fmt.Errorf("failed to delete old key %s during rotation: %w", oldID, err)
 					}
@@ -213,7 +217,7 @@ func newRotateCmd(app *App) *cobra.Command {
 	cmd.Flags().IntVar(&validityHours, "validity-hours", 0, "Key validity duration in hours (for local method)")
 	cmd.Flags().StringVarP(&outCredentials, "out-credentials", "o", "", "Path to save rotated credentials JSON (default: <sa>-rotated-<key-id>.json)")
 	cmd.Flags().BoolVar(&disableOld, "disable-old", false, "Disable previously active user-managed keys")
-	cmd.Flags().BoolVar(&deleteOld, "delete-old", false, "Permanently delete previously active user-managed keys")
+	cmd.Flags().BoolVar(&deleteOld, "delete-old", false, "Permanently delete all previous user-managed keys (including expired and disabled)")
 	cmd.Flags().StringVar(&commonName, "common-name", "service-account-key", "Common name for certificate subject (local method)")
 
 	return cmd

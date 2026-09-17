@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -43,22 +44,16 @@ type App struct {
 	Format          string
 	CredentialsFile string
 	Verbose         bool
+	DebugHTTP       bool
+	ShowTokens      bool
 }
 
 // NewDefaultApp creates an App with standard OS and GCP dependencies.
 func NewDefaultApp() *App {
-	return &App{
+	app := &App{
 		In:     os.Stdin,
 		Out:    os.Stdout,
 		ErrOut: os.Stderr,
-		ClientFactory: func(ctx context.Context, credentialsFile string) (client.IAMClient, error) {
-			return client.NewGCPClient(ctx, client.GCPClientOptions{
-				CredentialsFile: credentialsFile,
-			})
-		},
-		VerifyKeyReady: func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
-			return client.WaitForKeyFullyPropagated(ctx, iamClient, saEmail, keyID, 45*time.Second)
-		},
 		OSWriteFile: os.WriteFile,
 		OSReadFile:  os.ReadFile,
 		Crypto: CryptoOps{
@@ -70,6 +65,26 @@ func NewDefaultApp() *App {
 		},
 		Format: "table",
 	}
+
+	app.ClientFactory = func(ctx context.Context, credentialsFile string) (client.IAMClient, error) {
+		return client.NewGCPClient(ctx, client.GCPClientOptions{
+			CredentialsFile: credentialsFile,
+			DebugHTTP:       app.Verbose || app.DebugHTTP,
+			MaskTokens:      !app.ShowTokens,
+			LogWriter:       app.ErrOut,
+		})
+	}
+
+	app.VerifyKeyReady = func(ctx context.Context, iamClient client.IAMClient, saEmail, keyID string) error {
+		var httpClient *http.Client
+		if app.Verbose || app.DebugHTTP {
+			tr := client.NewHTTPLoggingTransport(http.DefaultTransport, app.ErrOut, !app.ShowTokens)
+			httpClient = &http.Client{Transport: tr}
+		}
+		return client.WaitForKeyFullyPropagatedWithClient(ctx, httpClient, "", iamClient, saEmail, keyID, 45*time.Second)
+	}
+
+	return app
 }
 
 // NewRootCommand builds the root cobra command and attaches all subcommands.
@@ -95,7 +110,9 @@ while adhering to GCP Organization Policies (iam.disableServiceAccountKeyCreatio
 
 	rootCmd.PersistentFlags().StringVarP(&app.Format, "format", "f", "table", "Output format: table, json, yaml")
 	rootCmd.PersistentFlags().StringVarP(&app.CredentialsFile, "credentials-file", "c", "", "Path to explicit GCP credentials JSON (defaults to ADC)")
-	rootCmd.PersistentFlags().BoolVarP(&app.Verbose, "verbose", "v", false, "Enable verbose logging")
+	rootCmd.PersistentFlags().BoolVarP(&app.Verbose, "verbose", "v", false, "Enable verbose logging (includes full HTTP wire conversations)")
+	rootCmd.PersistentFlags().BoolVar(&app.DebugHTTP, "debug-http", false, "Log full HTTP request and response wire traffic to stderr")
+	rootCmd.PersistentFlags().BoolVar(&app.ShowTokens, "show-tokens", false, "Display unmasked access tokens in HTTP wire logs (default: masked)")
 
 	rootCmd.AddCommand(
 		newListCmd(app),

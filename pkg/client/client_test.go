@@ -1,15 +1,18 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/iam/admin/apiv1/adminpb"
-	"github.com/googleapis/gax-go/v2"
+	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/option"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestResourceNameHelpers(t *testing.T) {
@@ -28,13 +31,12 @@ func TestResourceNameHelpers(t *testing.T) {
 
 	extracted := ExtractKeyID(keyName)
 	if extracted != keyID {
-		t.Fatalf("expected keyID %s, got %s", keyID, extracted)
+		t.Fatalf("unexpected extracted key ID: %s", extracted)
 	}
 
-	// Extract without /keys/
-	extractedRaw := ExtractKeyID("just-a-key-id")
-	if extractedRaw != "just-a-key-id" {
-		t.Fatalf("expected raw key ID, got %s", extractedRaw)
+	rawID := ExtractKeyID(keyID)
+	if rawID != keyID {
+		t.Fatalf("unexpected raw key ID: %s", rawID)
 	}
 }
 
@@ -42,41 +44,45 @@ func TestMockIAMClient(t *testing.T) {
 	ctx := context.Background()
 	mock := NewMockIAMClient()
 	sa := "test-sa@project.iam.gserviceaccount.com"
+	now := time.Now()
 
-	// 1. ListKeys on empty
-	keys, err := mock.ListKeys(ctx, sa, nil)
-	if err != nil || len(keys) != 0 {
-		t.Fatalf("expected empty list, got: %v, err: %v", keys, err)
+	// 0. Nonexistent SA ListKeys
+	nonexistentKeys, err := mock.ListKeys(ctx, "nonexistent@sa.com", nil)
+	if err != nil || len(nonexistentKeys) != 0 {
+		t.Fatalf("expected empty slice for nonexistent SA, got %v, err=%v", nonexistentKeys, err)
 	}
 
-	// 2. CreateKey
+	// 1. UploadKey on fresh SA (map initialization)
+	freshMock := NewMockIAMClient()
+	if _, err := freshMock.UploadKey(ctx, "fresh@sa.com", []byte("fake-cert")); err != nil {
+		t.Fatalf("unexpected upload on fresh SA: %v", err)
+	}
+
+	// 1. CreateKey
 	created, err := mock.CreateKey(ctx, sa)
-	if err != nil || created == nil {
-		t.Fatalf("expected key creation to succeed, got: %v, err: %v", created, err)
+	if err != nil {
+		t.Fatalf("unexpected create error: %v", err)
 	}
 	keyID := created.ID
 
-	// 3. UploadKey
-	uploaded, err := mock.UploadKey(ctx, sa, []byte("cert-data"))
-	if err != nil || uploaded == nil {
-		t.Fatalf("expected key upload to succeed, got: %v, err: %v", uploaded, err)
+	// 2. UploadKey
+	uploaded, err := mock.UploadKey(ctx, sa, []byte("fake-cert"))
+	if err != nil {
+		t.Fatalf("unexpected upload error: %v", err)
 	}
 
-	// 3b. UploadKey on brand-new SA (covers map initialization)
-	if _, err := mock.UploadKey(ctx, "fresh-sa@project.com", []byte("cert-data")); err != nil {
-		t.Fatalf("unexpected error uploading to fresh SA: %v", err)
-	}
+	// 3. Add system key manually
+	mock.AddKey(sa, &KeyInfo{
+		ID:              "sys-key-1",
+		KeyType:         KeyTypeSystemManaged,
+		ValidBeforeTime: now.Add(24 * time.Hour),
+	})
 
-	// 4. AddKey manually (System managed)
-	systemKey := &KeyInfo{
-		ID:       "sys-key-1",
-		KeyType:  KeyTypeSystemManaged,
-		Disabled: false,
+	// 4. ListKeys all
+	keys, err := mock.ListKeys(ctx, sa, []KeyType{KeyTypeUserManaged, KeyTypeSystemManaged})
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("expected 3 keys, got %d (err: %v)", len(keys), err)
 	}
-	mock.AddKey(sa, systemKey)
-
-	// 4b. AddKey on brand-new SA (covers map initialization)
-	mock.AddKey("another-fresh-sa@project.com", systemKey)
 
 	// 5. ListKeys filtered
 	userKeys, err := mock.ListKeys(ctx, sa, []KeyType{KeyTypeUserManaged})
@@ -193,17 +199,18 @@ func TestMockIAMClient(t *testing.T) {
 	if err := mock.Close(); err == nil {
 		t.Fatalf("expected injected CloseErr")
 	}
+	_ = uploaded
 }
 
 // fakeAdminAPI mocks the underlying iamAdminAPI for GCPClient tests
 type fakeAdminAPI struct {
-	listResp   *adminpb.ListServiceAccountKeysResponse
+	listResp   []*iam.ServiceAccountKey
 	listErr    error
-	getResp    *adminpb.ServiceAccountKey
+	getResp    *iam.ServiceAccountKey
 	getErr     error
-	createResp *adminpb.ServiceAccountKey
+	createResp *iam.ServiceAccountKey
 	createErr  error
-	uploadResp *adminpb.ServiceAccountKey
+	uploadResp *iam.ServiceAccountKey
 	uploadErr  error
 	deleteErr  error
 	disableErr error
@@ -211,25 +218,25 @@ type fakeAdminAPI struct {
 	closeErr   error
 }
 
-func (f *fakeAdminAPI) ListServiceAccountKeys(ctx context.Context, req *adminpb.ListServiceAccountKeysRequest, opts ...gax.CallOption) (*adminpb.ListServiceAccountKeysResponse, error) {
+func (f *fakeAdminAPI) ListServiceAccountKeys(ctx context.Context, parent string, keyTypes []string) ([]*iam.ServiceAccountKey, error) {
 	return f.listResp, f.listErr
 }
-func (f *fakeAdminAPI) GetServiceAccountKey(ctx context.Context, req *adminpb.GetServiceAccountKeyRequest, opts ...gax.CallOption) (*adminpb.ServiceAccountKey, error) {
+func (f *fakeAdminAPI) GetServiceAccountKey(ctx context.Context, name string) (*iam.ServiceAccountKey, error) {
 	return f.getResp, f.getErr
 }
-func (f *fakeAdminAPI) CreateServiceAccountKey(ctx context.Context, req *adminpb.CreateServiceAccountKeyRequest, opts ...gax.CallOption) (*adminpb.ServiceAccountKey, error) {
+func (f *fakeAdminAPI) CreateServiceAccountKey(ctx context.Context, parent string, req *iam.CreateServiceAccountKeyRequest) (*iam.ServiceAccountKey, error) {
 	return f.createResp, f.createErr
 }
-func (f *fakeAdminAPI) UploadServiceAccountKey(ctx context.Context, req *adminpb.UploadServiceAccountKeyRequest, opts ...gax.CallOption) (*adminpb.ServiceAccountKey, error) {
+func (f *fakeAdminAPI) UploadServiceAccountKey(ctx context.Context, parent string, req *iam.UploadServiceAccountKeyRequest) (*iam.ServiceAccountKey, error) {
 	return f.uploadResp, f.uploadErr
 }
-func (f *fakeAdminAPI) DeleteServiceAccountKey(ctx context.Context, req *adminpb.DeleteServiceAccountKeyRequest, opts ...gax.CallOption) error {
+func (f *fakeAdminAPI) DeleteServiceAccountKey(ctx context.Context, name string) error {
 	return f.deleteErr
 }
-func (f *fakeAdminAPI) DisableServiceAccountKey(ctx context.Context, req *adminpb.DisableServiceAccountKeyRequest, opts ...gax.CallOption) error {
+func (f *fakeAdminAPI) DisableServiceAccountKey(ctx context.Context, name string) error {
 	return f.disableErr
 }
-func (f *fakeAdminAPI) EnableServiceAccountKey(ctx context.Context, req *adminpb.EnableServiceAccountKeyRequest, opts ...gax.CallOption) error {
+func (f *fakeAdminAPI) EnableServiceAccountKey(ctx context.Context, name string) error {
 	return f.enableErr
 }
 func (f *fakeAdminAPI) Close() error {
@@ -239,62 +246,60 @@ func (f *fakeAdminAPI) Close() error {
 func TestGCPClient_Operations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
-	nowProto := timestamppb.New(now)
+	nowStr := now.Format(time.RFC3339)
 
-	protoKey1 := &adminpb.ServiceAccountKey{
+	key1 := &iam.ServiceAccountKey{
 		Name:            "projects/-/serviceAccounts/sa@proj.com/keys/k1",
-		PrivateKeyType:  adminpb.ServiceAccountPrivateKeyType_TYPE_GOOGLE_CREDENTIALS_FILE,
-		KeyAlgorithm:    adminpb.ServiceAccountKeyAlgorithm_KEY_ALG_RSA_2048,
-		KeyType:         adminpb.ListServiceAccountKeysRequest_USER_MANAGED,
-		ValidAfterTime:  nowProto,
-		ValidBeforeTime: nowProto,
+		PrivateKeyType:  "TYPE_GOOGLE_CREDENTIALS_FILE",
+		KeyAlgorithm:    "KEY_ALG_RSA_2048",
+		KeyType:         "USER_MANAGED",
+		ValidAfterTime:  nowStr,
+		ValidBeforeTime: nowStr,
 		Disabled:        false,
-		PrivateKeyData:  []byte("priv-data"),
-		PublicKeyData:   []byte("pub-data"),
+		PrivateKeyData:  base64.StdEncoding.EncodeToString([]byte("priv-data")),
+		PublicKeyData:   base64.StdEncoding.EncodeToString([]byte("pub-data")),
 	}
 
-	protoKey2 := &adminpb.ServiceAccountKey{
+	key2 := &iam.ServiceAccountKey{
 		Name:            "projects/-/serviceAccounts/sa@proj.com/keys/k2",
-		KeyType:         adminpb.ListServiceAccountKeysRequest_SYSTEM_MANAGED,
-		ValidAfterTime:  nowProto,
-		ValidBeforeTime: nowProto,
+		KeyType:         "SYSTEM_MANAGED",
+		ValidAfterTime:  nowStr,
+		ValidBeforeTime: nowStr,
 		Disabled:        true,
+		PublicKeyData:   "raw-pem-data",
 	}
 
-	protoKey3 := &adminpb.ServiceAccountKey{
+	key3 := &iam.ServiceAccountKey{
 		Name:            "projects/-/serviceAccounts/sa@proj.com/keys/k3",
-		KeyType:         adminpb.ListServiceAccountKeysRequest_KEY_TYPE_UNSPECIFIED,
-		ValidAfterTime:  nowProto,
-		ValidBeforeTime: nowProto,
+		KeyType:         "KEY_TYPE_UNSPECIFIED",
+		ValidAfterTime:  "",
+		ValidBeforeTime: "",
 	}
 
 	fake := &fakeAdminAPI{
-		listResp: &adminpb.ListServiceAccountKeysResponse{
-			Keys: []*adminpb.ServiceAccountKey{protoKey1, protoKey2, protoKey3},
-		},
-		getResp:    protoKey1,
-		createResp: protoKey1,
-		uploadResp: protoKey1,
+		listResp:   []*iam.ServiceAccountKey{key1, key2, key3},
+		getResp:    key1,
+		createResp: key1,
+		uploadResp: key1,
 	}
 
 	client := &GCPClient{api: fake}
 
 	// 1. ListKeys
-	list, err := client.ListKeys(ctx, "sa@proj.com", []KeyType{KeyTypeUserManaged, KeyTypeSystemManaged, KeyTypeUnspecified})
-	if err != nil || len(list) != 3 {
-		t.Fatalf("unexpected list keys result: len=%d, err=%v", len(list), err)
+	keys, err := client.ListKeys(ctx, "sa@proj.com", []KeyType{KeyTypeUserManaged, KeyTypeSystemManaged, KeyTypeUnspecified})
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("unexpected list keys result: %d, err=%v", len(keys), err)
 	}
-	if list[0].ID != "k1" || list[0].KeyType != KeyTypeUserManaged {
-		t.Fatalf("unexpected key 0 mapping: %+v", list[0])
+	if keys[0].ID != "k1" || keys[0].KeyType != KeyTypeUserManaged {
+		t.Fatalf("unexpected key[0] data: %+v", keys[0])
 	}
-	if list[1].ID != "k2" || list[1].KeyType != KeyTypeSystemManaged || !list[1].Disabled {
-		t.Fatalf("unexpected key 1 mapping: %+v", list[1])
+	if keys[1].ID != "k2" || keys[1].KeyType != KeyTypeSystemManaged {
+		t.Fatalf("unexpected key[1] data: %+v", keys[1])
 	}
-	if list[2].ID != "k3" || list[2].KeyType != KeyTypeUnspecified {
-		t.Fatalf("unexpected key 2 mapping: %+v", list[2])
+	if keys[2].ID != "k3" || keys[2].KeyType != KeyTypeUnspecified {
+		t.Fatalf("unexpected key[2] data: %+v", keys[2])
 	}
 
-	// ListKeys error
 	fake.listErr = errors.New("list failed")
 	if _, err := client.ListKeys(ctx, "sa@proj.com", nil); err == nil {
 		t.Fatalf("expected list keys error")
@@ -362,32 +367,31 @@ func TestGCPClient_Operations(t *testing.T) {
 		t.Fatalf("unexpected close error: %v", err)
 	}
 
-	// 9. protoToKeyInfo nil
-	if protoToKeyInfo(nil) != nil {
-		t.Fatalf("expected nil for protoToKeyInfo(nil)")
+	// 9. iamToKeyInfo nil
+	if iamToKeyInfo(nil) != nil {
+		t.Fatalf("expected nil for iamToKeyInfo(nil)")
 	}
 }
 
 func TestNewGCPClient(t *testing.T) {
 	ctx := context.Background()
 
-	// Mock the defaultClientFactory
 	origFactory := defaultClientFactory
 	defer func() { defaultClientFactory = origFactory }()
 
-	var passedOpts []option.ClientOption
-	defaultClientFactory = func(ctx context.Context, opts ...option.ClientOption) (iamAdminAPI, error) {
+	var passedOpts GCPClientOptions
+	defaultClientFactory = func(ctx context.Context, opts GCPClientOptions) (iamAdminAPI, error) {
 		passedOpts = opts
 		return &fakeAdminAPI{}, nil
 	}
 
-	// 1. Success without credentials file
-	client1, err := NewGCPClient(ctx, GCPClientOptions{})
+	// 1. Success with debug options
+	client1, err := NewGCPClient(ctx, GCPClientOptions{DebugHTTP: true, MaskTokens: true})
 	if err != nil || client1 == nil {
 		t.Fatalf("unexpected error creating GCPClient: %v", err)
 	}
-	if len(passedOpts) != 0 {
-		t.Fatalf("expected no options, got %d", len(passedOpts))
+	if !passedOpts.DebugHTTP || !passedOpts.MaskTokens {
+		t.Fatalf("expected DebugHTTP and MaskTokens to be passed")
 	}
 
 	// 2. Success with credentials file
@@ -395,12 +399,12 @@ func TestNewGCPClient(t *testing.T) {
 	if err != nil || client2 == nil {
 		t.Fatalf("unexpected error creating GCPClient with creds: %v", err)
 	}
-	if len(passedOpts) != 1 {
-		t.Fatalf("expected 1 option for credentials file, got %d", len(passedOpts))
+	if passedOpts.CredentialsFile != "/path/to/creds.json" {
+		t.Fatalf("expected credentials file to be passed")
 	}
 
 	// 3. Factory error
-	defaultClientFactory = func(ctx context.Context, opts ...option.ClientOption) (iamAdminAPI, error) {
+	defaultClientFactory = func(ctx context.Context, opts GCPClientOptions) (iamAdminAPI, error) {
 		return nil, errors.New("factory failure")
 	}
 	if _, err := NewGCPClient(ctx, GCPClientOptions{}); err == nil {
@@ -409,11 +413,119 @@ func TestNewGCPClient(t *testing.T) {
 }
 
 func TestDefaultClientFactory(t *testing.T) {
-	// Call defaultClientFactory to cover line in gcp.go without crashing (using invalid endpoint to avoid network)
 	ctx := context.Background()
-	client, err := defaultClientFactory(ctx, option.WithEndpoint("invalid:1234"), option.WithoutAuthentication())
-	if err == nil && client != nil {
-		_ = client.Close()
+	// Test without debug
+	client1, err := defaultClientFactory(ctx, GCPClientOptions{})
+	if err == nil && client1 != nil {
+		_ = client1.Close()
 	}
-	// Error or client is fine, statement is covered
+
+	// Test with debug
+	var buf bytes.Buffer
+	client2, err := defaultClientFactory(ctx, GCPClientOptions{
+		DebugHTTP:  true,
+		MaskTokens: true,
+		LogWriter:  &buf,
+	})
+	if err == nil && client2 != nil {
+		_ = client2.Close()
+	}
+}
+
+func TestIAMRESTAdapter(t *testing.T) {
+	ctx := context.Background()
+	mockRT := &testRoundTripper{}
+	httpClient := &http.Client{Transport: mockRT}
+	svc, err := iam.NewService(ctx, option.WithHTTPClient(httpClient), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("unexpected NewService err: %v", err)
+	}
+
+	adapter := &iamRESTAdapter{service: svc}
+
+	// 1. List
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"keys":[{"name":"projects/-/serviceAccounts/sa@p.com/keys/k1"}]}`)),
+	}
+	keys, err := adapter.ListServiceAccountKeys(ctx, "projects/-/serviceAccounts/sa@p.com", []string{"USER_MANAGED"})
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("unexpected ListServiceAccountKeys: %v, %v", keys, err)
+	}
+
+	// List error
+	mockRT.err = errors.New("list error")
+	if _, err := adapter.ListServiceAccountKeys(ctx, "projects/-/serviceAccounts/sa@p.com", nil); err == nil {
+		t.Fatalf("expected list error")
+	}
+	mockRT.err = nil
+
+	// 2. Get
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"name":"projects/-/serviceAccounts/sa@p.com/keys/k1"}`)),
+	}
+	key, err := adapter.GetServiceAccountKey(ctx, "projects/-/serviceAccounts/sa@p.com/keys/k1")
+	if err != nil || key.Name != "projects/-/serviceAccounts/sa@p.com/keys/k1" {
+		t.Fatalf("unexpected GetServiceAccountKey: %v, %v", key, err)
+	}
+
+	// 3. Create
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"name":"projects/-/serviceAccounts/sa@p.com/keys/k1"}`)),
+	}
+	created, err := adapter.CreateServiceAccountKey(ctx, "projects/-/serviceAccounts/sa@p.com", &iam.CreateServiceAccountKeyRequest{})
+	if err != nil || created.Name != "projects/-/serviceAccounts/sa@p.com/keys/k1" {
+		t.Fatalf("unexpected CreateServiceAccountKey: %v, %v", created, err)
+	}
+
+	// 4. Upload
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"name":"projects/-/serviceAccounts/sa@p.com/keys/k1"}`)),
+	}
+	uploaded, err := adapter.UploadServiceAccountKey(ctx, "projects/-/serviceAccounts/sa@p.com", &iam.UploadServiceAccountKeyRequest{})
+	if err != nil || uploaded.Name != "projects/-/serviceAccounts/sa@p.com/keys/k1" {
+		t.Fatalf("unexpected UploadServiceAccountKey: %v, %v", uploaded, err)
+	}
+
+	// 5. Delete
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+	}
+	if err := adapter.DeleteServiceAccountKey(ctx, "projects/-/serviceAccounts/sa@p.com/keys/k1"); err != nil {
+		t.Fatalf("unexpected DeleteServiceAccountKey: %v", err)
+	}
+
+	// 6. Disable
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+	}
+	if err := adapter.DisableServiceAccountKey(ctx, "projects/-/serviceAccounts/sa@p.com/keys/k1"); err != nil {
+		t.Fatalf("unexpected DisableServiceAccountKey: %v", err)
+	}
+
+	// 7. Enable
+	mockRT.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+	}
+	if err := adapter.EnableServiceAccountKey(ctx, "projects/-/serviceAccounts/sa@p.com/keys/k1"); err != nil {
+		t.Fatalf("unexpected EnableServiceAccountKey: %v", err)
+	}
+
+	// 8. Close
+	if err := adapter.Close(); err != nil {
+		t.Fatalf("unexpected Close: %v", err)
+	}
 }

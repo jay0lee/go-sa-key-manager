@@ -2,10 +2,13 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/googleapis/gax-go/v2"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -29,6 +32,10 @@ import (
 func IsRetryableGCPError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) {
+		return IsRetryableHTTPStatus(gErr.Code)
 	}
 	s, ok := status.FromError(err)
 	if ok {
@@ -58,11 +65,19 @@ func IsRetryableHTTPStatus(statusCode int) bool {
 	}
 }
 
-// ExtractRetryDelay inspects a gRPC error's status details for an errdetails.RetryInfo payload.
-// If Google Cloud specified a recommended retry delay (e.g. "retry in 1m0s"), it returns that duration.
+// ExtractRetryDelay inspects an error's status details or HTTP headers for retry delay information.
+// If Google Cloud specified a recommended retry delay (e.g. "retry in 1m0s" or Retry-After header), it returns that duration.
 func ExtractRetryDelay(err error) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
+	}
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) && gErr.Header != nil {
+		if retryAfter := gErr.Header.Get("Retry-After"); retryAfter != "" {
+			if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil && seconds > 0 {
+				return time.Duration(seconds) * time.Second, true
+			}
+		}
 	}
 	s, ok := status.FromError(err)
 	if !ok {

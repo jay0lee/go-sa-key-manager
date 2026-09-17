@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -70,6 +71,17 @@ func TestIsRetryableGCPError(t *testing.T) {
 	notFoundErr3 := status.Error(codes.NotFound, "Key projects/-/serviceAccounts/my-sa/keys/k1 does not exist.")
 	if IsRetryableGCPError(notFoundErr3) {
 		t.Errorf("expected key NotFound to NOT be retryable")
+	}
+
+	// googleapi.Error retryable vs non-retryable
+	if !IsRetryableGCPError(&googleapi.Error{Code: 429}) {
+		t.Errorf("expected googleapi 429 to be retryable")
+	}
+	if !IsRetryableGCPError(&googleapi.Error{Code: 503}) {
+		t.Errorf("expected googleapi 503 to be retryable")
+	}
+	if IsRetryableGCPError(&googleapi.Error{Code: 400}) {
+		t.Errorf("expected googleapi 400 to NOT be retryable")
 	}
 }
 
@@ -139,6 +151,19 @@ func TestExtractRetryDelay(t *testing.T) {
 	delay, ok := ExtractRetryDelay(stWithValid.Err())
 	if !ok || delay != wantDelay {
 		t.Errorf("expected delay %v, got %v (ok=%v)", wantDelay, delay, ok)
+	}
+
+	// 7. googleapi.Error with Retry-After header
+	headerWithRetry := http.Header{"Retry-After": []string{"10"}}
+	gErrWithHeader := &googleapi.Error{Code: 429, Header: headerWithRetry}
+	if d, ok := ExtractRetryDelay(gErrWithHeader); !ok || d != 10*time.Second {
+		t.Errorf("expected 10s retry delay from googleapi.Error header, got %v, ok=%v", d, ok)
+	}
+
+	headerWithBadRetry := http.Header{"Retry-After": []string{"invalid"}}
+	gErrWithBadHeader := &googleapi.Error{Code: 429, Header: headerWithBadRetry}
+	if _, ok := ExtractRetryDelay(gErrWithBadHeader); ok {
+		t.Errorf("expected invalid Retry-After to return ok=false")
 	}
 }
 

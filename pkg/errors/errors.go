@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -60,6 +61,40 @@ func WrapGCPError(err error) error {
 		return nil
 	}
 
+	// Check googleapi.Error (REST API)
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) {
+		checkMsg := gErr.Message
+		if gErr.Body != "" {
+			checkMsg = checkMsg + " " + gErr.Body
+		}
+		if violation := detectPolicyViolation(checkMsg, err); violation != nil {
+			return violation
+		}
+		var code codes.Code
+		switch gErr.Code {
+		case 400:
+			code = codes.InvalidArgument
+		case 401:
+			code = codes.Unauthenticated
+		case 403:
+			code = codes.PermissionDenied
+		case 404:
+			code = codes.NotFound
+		case 409:
+			code = codes.AlreadyExists
+		case 412:
+			code = codes.FailedPrecondition
+		case 429:
+			code = codes.ResourceExhausted
+		case 503:
+			code = codes.Unavailable
+		default:
+			code = codes.Code(gErr.Code)
+		}
+		return createIAMError(code, gErr.Message, err)
+	}
+
 	// Check gRPC status
 	st, ok := status.FromError(err)
 	if !ok {
@@ -75,6 +110,10 @@ func WrapGCPError(err error) error {
 		return violation
 	}
 
+	return createIAMError(code, msg, err)
+}
+
+func createIAMError(code codes.Code, msg string, err error) *IAMError {
 	switch code {
 	case codes.FailedPrecondition:
 		return &IAMError{
@@ -121,6 +160,22 @@ func WrapGCPError(err error) error {
 			Code:        code,
 			Message:     msg,
 			Remediation: "The specified key or resource already exists.",
+			Err:         err,
+		}
+
+	case codes.ResourceExhausted:
+		return &IAMError{
+			Code:        code,
+			Message:     msg,
+			Remediation: "GCP API rate limit or quota exceeded. The request may be retried after exponential backoff.",
+			Err:         err,
+		}
+
+	case codes.Unavailable:
+		return &IAMError{
+			Code:        code,
+			Message:     msg,
+			Remediation: "GCP IAM service is temporarily unavailable. The request will be automatically retried.",
 			Err:         err,
 		}
 

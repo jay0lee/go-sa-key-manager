@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -256,3 +257,48 @@ func TestWrapGCPError_PlainErrors(t *testing.T) {
 		t.Fatalf("expected original plain error to be returned unchanged, got: %v", wrapped3)
 	}
 }
+
+func TestWrapGCPError_GoogleAPIError(t *testing.T) {
+	// 1. Policy violation in Message or Body
+	gErrPolicy := &googleapi.Error{
+		Code:    412,
+		Message: "Key creation is disabled by organization policy",
+		Body:    `{"error": {"message": "constraints/iam.disableServiceAccountKeyCreation"}}`,
+	}
+	wrappedPolicy := WrapGCPError(gErrPolicy)
+	if !IsPolicyViolation(wrappedPolicy) {
+		t.Fatalf("expected policy violation for googleapi error")
+	}
+
+	// 2. HTTP codes mapping to IAMError
+	codesMap := []struct {
+		httpCode int
+		expected codes.Code
+	}{
+		{400, codes.InvalidArgument},
+		{401, codes.Unauthenticated},
+		{403, codes.PermissionDenied},
+		{404, codes.NotFound},
+		{409, codes.AlreadyExists},
+		{412, codes.FailedPrecondition},
+		{429, codes.ResourceExhausted},
+		{503, codes.Unavailable},
+		{500, codes.Code(500)},
+	}
+
+	for _, tc := range codesMap {
+		gErr := &googleapi.Error{
+			Code:    tc.httpCode,
+			Message: fmt.Sprintf("HTTP %d error", tc.httpCode),
+		}
+		wrapped := WrapGCPError(gErr)
+		var ie *IAMError
+		if !errors.As(wrapped, &ie) {
+			t.Fatalf("expected IAMError for HTTP %d, got %T", tc.httpCode, wrapped)
+		}
+		if ie.Code != tc.expected {
+			t.Fatalf("expected code %v for HTTP %d, got %v", tc.expected, tc.httpCode, ie.Code)
+		}
+	}
+}
+
