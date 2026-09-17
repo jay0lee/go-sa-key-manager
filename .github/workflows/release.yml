@@ -35,22 +35,38 @@ jobs:
           echo "version=$VER" >> $GITHUB_OUTPUT
 
   build:
-    name: Build (${{ matrix.platform }})
+    name: Build (${{ matrix.name }})
     needs: [version]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 and ARM64 built on ubuntu-latest
+          # Native Linux x86_64
           - runner: ubuntu-latest
-            platform: linux
-          # macOS Apple Silicon (ARM64 only; Intel x86_64 explicitly excluded)
+            name: Linux x86_64
+            binary: gcp-sa-key-manager-linux-amd64
+            darwin_flags: ""
+          # Native Linux ARM64
+          - runner: ubuntu-24.04-arm
+            name: Linux ARM64
+            binary: gcp-sa-key-manager-linux-arm64
+            darwin_flags: ""
+          # Native macOS Apple Silicon ARM64 (Intel x86_64 Mac explicitly excluded)
           - runner: macos-latest
-            platform: macos
-          # Windows x86_64 and ARM64 built on windows-latest
+            name: macOS Apple Silicon (ARM64)
+            binary: gcp-sa-key-manager-darwin-arm64
+            darwin_flags: "-macos 11.0"
+          # Native Windows x86_64
           - runner: windows-latest
-            platform: windows
+            name: Windows x86_64
+            binary: gcp-sa-key-manager-windows-amd64.exe
+            darwin_flags: ""
+          # Native Windows ARM64
+          - runner: windows-11-arm
+            name: Windows ARM64
+            binary: gcp-sa-key-manager-windows-arm64.exe
+            darwin_flags: ""
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,37 +76,27 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Build binaries (${{ matrix.platform }})
+      - name: Build binary on native architecture
         shell: bash
         run: |
           mkdir -p dist
           VER="${{ needs.version.outputs.version }}"
           COMMIT="${{ github.sha }}"
           BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          COMMON_LDFLAGS="-s -w -X github.com/jay0lee/go-sa-key-manager/cmd.Version=${VER} -X github.com/jay0lee/go-sa-key-manager/cmd.GitCommit=${COMMIT:0:7} -X github.com/jay0lee/go-sa-key-manager/cmd.BuildDate=${BUILD_DATE}"
+          LDFLAGS="-s -w ${{ matrix.darwin_flags }} -X github.com/jay0lee/go-sa-key-manager/cmd.Version=${VER} -X github.com/jay0lee/go-sa-key-manager/cmd.GitCommit=${COMMIT:0:7} -X github.com/jay0lee/go-sa-key-manager/cmd.BuildDate=${BUILD_DATE}"
 
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            echo "Building Linux amd64..."
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-linux-amd64 main.go
-            echo "Building Linux arm64..."
-            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-linux-arm64 main.go
-          elif [ "${{ matrix.platform }}" = "macos" ]; then
-            echo "Building macOS Apple Silicon (arm64)..."
-            # Explicitly target macOS 11.0 (earliest Apple Silicon release) for maximum backward compatibility
-            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-macos 11.0 ${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-darwin-arm64 main.go
-          elif [ "${{ matrix.platform }}" = "windows" ]; then
-            echo "Building Windows amd64..."
-            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-windows-amd64.exe main.go
-            echo "Building Windows arm64..."
-            CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags "${COMMON_LDFLAGS}" -o dist/gcp-sa-key-manager-windows-arm64.exe main.go
-          fi
+          echo "Building ${{ matrix.binary }} natively on ${{ matrix.runner }}..."
+          CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/${{ matrix.binary }}" main.go
+
+          echo "Verifying native binary execution..."
+          "./dist/${{ matrix.binary }}" version
 
           ls -la dist/
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.platform }}
+          name: binary-${{ matrix.binary }}
           path: dist/*
           if-no-files-found: error
 

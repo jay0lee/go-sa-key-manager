@@ -8,12 +8,32 @@ on:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Native Linux x86_64
+          - runner: ubuntu-latest
+            name: Linux x86_64
+            race: true
+          # Native Linux ARM64
+          - runner: ubuntu-24.04-arm
+            name: Linux ARM64
+            race: true
+          # Native macOS Apple Silicon ARM64 (Intel x86_64 Mac explicitly excluded)
+          - runner: macos-latest
+            name: macOS Apple Silicon (ARM64)
+            race: true
+          # Native Windows x86_64
+          - runner: windows-latest
+            name: Windows x86_64
+            race: true
+          # Native Windows ARM64 (Note: Go race detector / TSAN is unsupported on windows/arm64)
+          - runner: windows-11-arm
+            name: Windows ARM64
+            race: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,11 +43,20 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Run tests with race detector
-        run: go test -v -race ./...
+      - name: Run unit tests on native architecture
+        shell: bash
+        run: |
+          if [ "${{ matrix.race }}" = "true" ]; then
+            go test -v -race ./...
+          else
+            go test -v ./...
+          fi
 
-      - name: Verify build
-        run: go build -v ./...
+      - name: Verify native build and execution
+        shell: bash
+        run: |
+          go build -v -o ./test-bin main.go
+          ./test-bin version
 
   coverage:
     name: Verify 100% Test Coverage
