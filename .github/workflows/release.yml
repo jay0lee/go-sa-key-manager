@@ -1,6 +1,10 @@
 name: Release
 
 on:
+  schedule:
+    # Run once a week during the slowest hours in the USA:
+    # Sunday at 08:00 UTC (1:00 AM PDT / 4:00 AM EDT / 12:00 AM HST)
+    - cron: '0 8 * * 0'
   push:
     tags:
       - 'v*'
@@ -39,6 +43,8 @@ jobs:
           else
             VER="v$(date -u +'%Y.%m.%d.%H%M')"
           fi
+          # Strip any accidental .testNN suffix if present
+          VER=$(echo "$VER" | sed -E 's/\.test[0-9]+//g')
           echo "Release version: $VER"
           echo "version=$VER" >> $GITHUB_OUTPUT
 
