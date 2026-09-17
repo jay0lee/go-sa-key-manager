@@ -30,6 +30,44 @@ The tool provides automated key rotation, local cryptographic key generation, su
 
 ---
 
+## Quick Installation & Auto-Update
+
+### macOS & Linux (Bash)
+Install or update to the latest release with one command:
+```bash
+curl -fsSL https://raw.githubusercontent.com/jay0lee/go-sa-key-manager/main/scripts/update.sh | bash
+```
+Options supported:
+```bash
+# Check if an update is available without installing
+./scripts/update.sh --check
+
+# Force reinstallation of the latest release
+./scripts/update.sh --force
+
+# Install to a custom directory
+./scripts/update.sh --target-dir ~/bin
+```
+
+### Windows (PowerShell)
+Install or update to the latest release in PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/jay0lee/go-sa-key-manager/main/scripts/update.ps1 | iex
+```
+Options supported:
+```powershell
+# Check for updates without installing
+powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -CheckOnly
+
+# Force reinstallation
+powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -Force
+```
+
+### Apple Developer Signing & Notarization
+macOS Apple Silicon (`darwin-arm64`) release binaries are signed with an official Apple **Developer ID Application** certificate using hardened runtime (`--options runtime`) and notarized by Apple via the **App Store Connect API** (OAuth/JWT), allowing seamless execution without Gatekeeper quarantine prompts.
+
+---
+
 ## Installation & Building
 
 ### Prerequisites

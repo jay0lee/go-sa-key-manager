@@ -180,6 +180,85 @@ jobs:
         run: |
           go test -v -tags=live ./test/integration/...
 
+      - name: Sign and Notarize macOS binary
+        if: matrix.runner == 'macos-latest'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+        run: |
+          BIN_PATH="dist/${{ matrix.binary }}"
+          if [ -z "${MACOS_CERTIFICATE_P12:-}" ]; then
+            echo "::warning::MACOS_CERTIFICATE_P12 secret is not configured in repository settings. Skipping macOS code signing and notarization."
+            exit 0
+          fi
+
+          echo "Setting up temporary macOS keychain for code signing..."
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PWD="$(openssl rand -base64 32)"
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+
+          # Decode certificate
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+
+          # Create and unlock temporary keychain
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+
+          # Import certificate into temporary keychain
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "${MACOS_CERTIFICATE_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+
+          # Add keychain to user search list
+          EXISTING_KEYCHAINS=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
+
+          # Detect Developer ID Application signing identity
+          SIGNING_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application:" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            # Fallback: check any valid code signing identity in the keychain
+            SIGNING_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep ')' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          fi
+
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "::error::Could not find a valid Developer ID code signing identity in imported certificate."
+            exit 1
+          fi
+
+          echo "Signing $BIN_PATH with identity: $SIGNING_IDENTITY..."
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$BIN_PATH"
+
+          echo "Verifying code signature..."
+          codesign --verify --deep --strict --verbose=2 "$BIN_PATH"
+          echo "✓ Code signature successfully verified."
+
+          # Notarization via App Store Connect API Key (OAuth/JWT)
+          if [ -n "${MACOS_NOTARY_KEY_ID:-}" ] && [ -n "${MACOS_NOTARY_ISSUER_ID:-}" ] && [ -n "${MACOS_NOTARY_KEY_P8:-}" ]; then
+            echo "Submitting macOS binary to Apple Notary Service via App Store Connect API key..."
+            NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+            echo "$MACOS_NOTARY_KEY_P8" | base64 --decode > "$NOTARY_KEY_PATH" 2>/dev/null || echo "$MACOS_NOTARY_KEY_P8" > "$NOTARY_KEY_PATH"
+
+            # Create zip for notary submission (Apple notarytool requires zip, pkg, or dmg)
+            NOTARY_ZIP="$RUNNER_TEMP/notarize_${{ matrix.binary }}.zip"
+            ditto -c -k --keepParent "$BIN_PATH" "$NOTARY_ZIP"
+
+            # Submit and wait for notarization ticket
+            xcrun notarytool submit "$NOTARY_ZIP" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$MACOS_NOTARY_KEY_ID" \
+              --issuer "$MACOS_NOTARY_ISSUER_ID" \
+              --wait
+
+            echo "✓ Apple notarization completed successfully!"
+            rm -f "$NOTARY_KEY_PATH" "$NOTARY_ZIP"
+          else
+            echo "::warning::App Store Connect API key secrets (MACOS_NOTARY_KEY_ID, MACOS_NOTARY_ISSUER_ID, MACOS_NOTARY_KEY_P8) not configured. Skipping Apple notarization."
+          fi
+
       - name: Package binary archive (${{ matrix.archive }})
         shell: bash
         run: |
@@ -202,6 +281,15 @@ jobs:
           name: binary-${{ matrix.runner_id }}
           path: dist/*
           if-no-files-found: error
+
+      - name: Clean up macOS Keychain and signing assets
+        if: always() && matrix.runner == 'macos-latest'
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/build.keychain" ]; then
+            security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/notarize_*.zip || true
 
   publish:
     name: Publish Release
