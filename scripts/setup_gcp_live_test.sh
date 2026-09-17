@@ -8,16 +8,19 @@
 # Requirements:
 #   - gcloud CLI authenticated with Organization Administrator or Folder Administrator role.
 #   - Organization ID or parent Folder ID.
-#   - Note: No billing account is required (IAM & Policy operations are free).
+#   - Note: To enforce Organization Policies, roles/orgpolicy.policyAdmin must be granted
+#     at the Organization level.
 
-set -euo pipefail
+set -uo pipefail
 
 # ------------------------------------------------------------------------------
 # Configuration & Inputs
 # ------------------------------------------------------------------------------
+CI_FOLDER_ID="${CI_FOLDER_ID:-}"               # Existing test folder ID if resuming (e.g., "442607557716")
 PARENT_FOLDER_ID="${PARENT_FOLDER_ID:-}"       # e.g., "123456789012" (leave empty if using ORG_ID)
 ORGANIZATION_ID="${ORGANIZATION_ID:-}"         # e.g., "123456789012" (leave empty if using PARENT_FOLDER_ID)
-PROJECT_PREFIX="${PROJECT_PREFIX:-sakm-ci}"    # Prefix for test projects (max 18 chars recommended)
+PROJECT_PREFIX="${PROJECT_PREFIX:-sakm-ci}"    # Prefix for test projects
+SUFFIX="${SUFFIX:-${RANDOM}}"                  # Suffix for project names (pass existing suffix to resume)
 GITHUB_REPO="${GITHUB_REPO:-jay0lee/go-sa-key-manager}" # Target GitHub repo
 
 # Colors for formatting
@@ -33,8 +36,8 @@ echo -e "${BLUE}  Target GitHub Repo: ${GITHUB_REPO}                           $
 echo -e "${BLUE}================================================================${NC}"
 
 # Validate Inputs
-if [ -z "${PARENT_FOLDER_ID}" ] && [ -z "${ORGANIZATION_ID}" ]; then
-  echo -e "${RED}ERROR: Either PARENT_FOLDER_ID or ORGANIZATION_ID must be provided.${NC}"
+if [ -z "${CI_FOLDER_ID}" ] && [ -z "${PARENT_FOLDER_ID}" ] && [ -z "${ORGANIZATION_ID}" ]; then
+  echo -e "${RED}ERROR: Either CI_FOLDER_ID, PARENT_FOLDER_ID, or ORGANIZATION_ID must be provided.${NC}"
   echo "Usage: ORGANIZATION_ID=\"12345\" ./scripts/setup_gcp_live_test.sh"
   exit 1
 fi
@@ -43,14 +46,12 @@ PARENT_FLAG=""
 if [ -n "${PARENT_FOLDER_ID}" ]; then
   PARENT_FLAG="--folder=${PARENT_FOLDER_ID}"
   echo -e "Using parent folder: ${PARENT_FOLDER_ID}"
-else
+elif [ -n "${ORGANIZATION_ID}" ]; then
   PARENT_FLAG="--organization=${ORGANIZATION_ID}"
   echo -e "Using organization: ${ORGANIZATION_ID}"
 fi
 
-# Define the 4 consolidated project IDs (must be globally unique in GCP)
-# Using a short random suffix to prevent collisions
-SUFFIX="${RANDOM}"
+# Define the 4 consolidated project IDs
 PROJ_STANDARD="${PROJECT_PREFIX}-std-${SUFFIX}"
 PROJ_NO_CREATE="${PROJECT_PREFIX}-noc-${SUFFIX}"
 PROJ_NO_UPLOAD="${PROJECT_PREFIX}-nou-${SUFFIX}"
@@ -64,31 +65,39 @@ PROJECTS=(
 )
 
 # ------------------------------------------------------------------------------
-# 1. Create Dedicated Test Folder
+# 1. Create Dedicated Test Folder (if not already provided)
 # ------------------------------------------------------------------------------
-FOLDER_NAME="sa-key-manager-ci"
-echo -e "\n${GREEN}[1/6] Creating GCP Folder: ${FOLDER_NAME}...${NC}"
-CI_FOLDER_ID=$(gcloud resource-manager folders create \
-  --display-name="${FOLDER_NAME}" \
-  ${PARENT_FLAG} \
-  --format="value(name)" | sed 's|folders/||')
-echo -e "Created folder ID: ${CI_FOLDER_ID}"
+if [ -n "${CI_FOLDER_ID}" ]; then
+  echo -e "\n${GREEN}[1/6] Using existing GCP Folder ID: ${CI_FOLDER_ID}...${NC}"
+else
+  FOLDER_NAME="sa-key-manager-ci"
+  echo -e "\n${GREEN}[1/6] Creating GCP Folder: ${FOLDER_NAME}...${NC}"
+  CI_FOLDER_ID=$(gcloud resource-manager folders create \
+    --display-name="${FOLDER_NAME}" \
+    ${PARENT_FLAG} \
+    --format="value(name)" | sed 's|folders/||')
+  echo -e "Created folder ID: ${CI_FOLDER_ID}"
+fi
 
 # ------------------------------------------------------------------------------
-# 2. Create the 4 Consolidated Policy Projects
+# 2. Create the 4 Consolidated Policy Projects (Idempotent)
 # ------------------------------------------------------------------------------
-echo -e "\n${GREEN}[2/6] Creating 4 consolidated policy projects in folder ${CI_FOLDER_ID}...${NC}"
+echo -e "\n${GREEN}[2/6] Ensuring 4 consolidated policy projects exist in folder ${CI_FOLDER_ID}...${NC}"
 for PROJ in "${PROJECTS[@]}"; do
-  echo "Creating project: ${PROJ}..."
-  gcloud projects create "${PROJ}" --folder="${CI_FOLDER_ID}" --name="${PROJ}"
+  if gcloud projects describe "${PROJ}" &>/dev/null; then
+    echo "Project ${PROJ} already exists. Skipping creation."
+  else
+    echo "Creating project: ${PROJ}..."
+    gcloud projects create "${PROJ}" --folder="${CI_FOLDER_ID}" --name="${PROJ}"
+  fi
 
-  echo "Enabling necessary APIs on ${PROJ}..."
+  echo "Ensuring necessary APIs are enabled on ${PROJ}..."
   gcloud services enable \
     iam.googleapis.com \
     cloudresourcemanager.googleapis.com \
     orgpolicy.googleapis.com \
     iamcredentials.googleapis.com \
-    --project="${PROJ}"
+    --project="${PROJ}" --quiet
 done
 
 # ------------------------------------------------------------------------------
@@ -96,21 +105,36 @@ done
 # ------------------------------------------------------------------------------
 echo -e "\n${GREEN}[3/6] Configuring Organization Policies...${NC}"
 
+CURRENT_ACCOUNT=$(gcloud config get-value account 2>/dev/null || echo "your account")
+
+apply_policy_safely() {
+  local CMD="$1"
+  local PROJ_DESC="$2"
+  echo "Applying policy for ${PROJ_DESC}..."
+  if ! eval "${CMD}" 2>/tmp/org_policy_err.log; then
+    echo -e "${YELLOW}[WARNING] Could not set Organization Policy for ${PROJ_DESC}.${NC}"
+    echo -e "${YELLOW}Reason:${NC} $(cat /tmp/org_policy_err.log | grep -i 'permission' || cat /tmp/org_policy_err.log | head -n 2)"
+    echo -e "${YELLOW}To enforce Organization Policies, an Organization Admin must grant:${NC}"
+    echo -e "  gcloud organizations add-iam-policy-binding <ORG_ID> \\"
+    echo -e "    --member=\"user:${CURRENT_ACCOUNT}\" \\"
+    echo -e "    --role=\"roles/orgpolicy.policyAdmin\""
+    echo -e "${YELLOW}Continuing with Service Account and WIF setup...${NC}\n"
+  else
+    echo -e "${GREEN}Policy applied successfully.${NC}"
+  fi
+  rm -f /tmp/org_policy_err.log
+}
+
 # A. Standard Project: Ensure no restrictive policies are enforced
-echo "Configuring standard project (unrestricted)..."
-gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyCreation --project="${PROJ_STANDARD}" || true
-gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyUpload --project="${PROJ_STANDARD}" || true
+apply_policy_safely "gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_STANDARD} && gcloud resource-manager org-policies disable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_STANDARD}" "standard project (unrestricted)"
 
 # B. No-Create Project: Enforce constraints/iam.disableServiceAccountKeyCreation
-echo "Configuring no-create project (enforcing disableServiceAccountKeyCreation)..."
-gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyCreation --project="${PROJ_NO_CREATE}"
+apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyCreation --project=${PROJ_NO_CREATE}" "no-create project (disableServiceAccountKeyCreation)"
 
 # C. No-Upload Project: Enforce constraints/iam.disableServiceAccountKeyUpload
-echo "Configuring no-upload project (enforcing disableServiceAccountKeyUpload)..."
-gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyUpload --project="${PROJ_NO_UPLOAD}"
+apply_policy_safely "gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyUpload --project=${PROJ_NO_UPLOAD}" "no-upload project (disableServiceAccountKeyUpload)"
 
 # D. Expiry-24h Project: Enforce constraints/iam.serviceAccountKeyExpiryHours = 24h
-echo "Configuring expiry project (enforcing serviceAccountKeyExpiryHours = 24h)..."
 TMP_POLICY_FILE=$(mktemp)
 cat << POLICY_EOF > "${TMP_POLICY_FILE}"
 name: projects/${PROJ_EXPIRY}/policies/constraints/iam.serviceAccountKeyExpiryHours
@@ -122,13 +146,13 @@ spec:
   inheritFromParent: false
 POLICY_EOF
 
-gcloud resource-manager org-policies set-policy "${TMP_POLICY_FILE}" --project="${PROJ_EXPIRY}"
+apply_policy_safely "gcloud resource-manager org-policies set-policy ${TMP_POLICY_FILE} --project=${PROJ_EXPIRY}" "expiry project (serviceAccountKeyExpiryHours=24h)"
 rm -f "${TMP_POLICY_FILE}"
 
 # ------------------------------------------------------------------------------
 # 4. Create Per-Runner Service Accounts in Identity Project (PROJ_STANDARD)
 # ------------------------------------------------------------------------------
-echo -e "\n${GREEN}[4/6] Creating 5 per-runner Service Accounts...${NC}"
+echo -e "\n${GREEN}[4/6] Ensuring 5 per-runner Service Accounts exist in ${PROJ_STANDARD}...${NC}"
 
 RUNNER_NAMES=(
   "linux-amd64"
@@ -145,10 +169,14 @@ for RUNNER in "${RUNNER_NAMES[@]}"; do
   SA_EMAIL="${SA_NAME}@${PROJ_STANDARD}.iam.gserviceaccount.com"
   RUNNER_EMAILS["${RUNNER}"]="${SA_EMAIL}"
 
-  echo "Creating runner Service Account: ${SA_NAME}..."
-  gcloud iam service-accounts create "${SA_NAME}" \
-    --project="${PROJ_STANDARD}" \
-    --display-name="CI Runner SA for ${RUNNER}"
+  if gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJ_STANDARD}" &>/dev/null; then
+    echo "Service Account ${SA_NAME} already exists."
+  else
+    echo "Creating runner Service Account: ${SA_NAME}..."
+    gcloud iam service-accounts create "${SA_NAME}" \
+      --project="${PROJ_STANDARD}" \
+      --display-name="CI Runner SA for ${RUNNER}"
+  fi
 
   # Grant permissions across all 4 test projects
   echo "Granting IAM roles across the 4 test projects to ${SA_EMAIL}..."
@@ -174,23 +202,31 @@ PROVIDER_ID="gh-oidc-provider"
 
 PROJ_NUMBER=$(gcloud projects describe "${PROJ_STANDARD}" --format="value(projectNumber)")
 
-# Create Pool
-echo "Creating Workload Identity Pool: ${POOL_ID}..."
-gcloud iam workload-identity-pools create "${POOL_ID}" \
-  --project="${PROJ_STANDARD}" \
-  --location="global" \
-  --display-name="GitHub Actions Pool" \
-  --description="Workload Identity Pool for GitHub Actions runners" || true
+# Create Pool if it doesn't exist
+if ! gcloud iam workload-identity-pools describe "${POOL_ID}" --project="${PROJ_STANDARD}" --location="global" &>/dev/null; then
+  echo "Creating Workload Identity Pool: ${POOL_ID}..."
+  gcloud iam workload-identity-pools create "${POOL_ID}" \
+    --project="${PROJ_STANDARD}" \
+    --location="global" \
+    --display-name="GitHub Actions Pool" \
+    --description="Workload Identity Pool for GitHub Actions runners"
+else
+  echo "Workload Identity Pool ${POOL_ID} already exists."
+fi
 
-# Create Provider
-echo "Creating OIDC Provider: ${PROVIDER_ID}..."
-gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
-  --project="${PROJ_STANDARD}" \
-  --location="global" \
-  --workload-identity-pool="${POOL_ID}" \
-  --display-name="GitHub OIDC Provider" \
-  --issuer-uri="https://token.actions.githubusercontent.com" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" || true
+# Create Provider if it doesn't exist
+if ! gcloud iam workload-identity-pools providers describe "${PROVIDER_ID}" --project="${PROJ_STANDARD}" --location="global" --workload-identity-pool="${POOL_ID}" &>/dev/null; then
+  echo "Creating OIDC Provider: ${PROVIDER_ID}..."
+  gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
+    --project="${PROJ_STANDARD}" \
+    --location="global" \
+    --workload-identity-pool="${POOL_ID}" \
+    --display-name="GitHub OIDC Provider" \
+    --issuer-uri="https://token.actions.githubusercontent.com" \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner"
+else
+  echo "OIDC Provider ${PROVIDER_ID} already exists."
+fi
 
 # Bind each runner Service Account to the GitHub repository
 WIF_PROVIDER_RESOURCE="projects/${PROJ_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
