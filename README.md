@@ -240,14 +240,10 @@ To provision the GCP folder, consolidated policy projects, per-runner Service Ac
 
 ```bash
 # Using an Organization ID:
-ORGANIZATION_ID="123456789012" \
-BILLING_ACCOUNT_ID="012345-6789AB-CDEF01" \
-./scripts/setup_gcp_live_test.sh
+ORGANIZATION_ID="123456789012" ./scripts/setup_gcp_live_test.sh
 
 # Or using a parent Folder ID:
-PARENT_FOLDER_ID="987654321098" \
-BILLING_ACCOUNT_ID="012345-6789AB-CDEF01" \
-./scripts/setup_gcp_live_test.sh
+PARENT_FOLDER_ID="987654321098" ./scripts/setup_gcp_live_test.sh
 ```
 
 The script automatically provisions:

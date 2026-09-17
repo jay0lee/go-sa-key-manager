@@ -6,9 +6,9 @@
 # per-runner Service Accounts, and Workload Identity Federation (WIF) for live testing.
 #
 # Requirements:
-#   - gcloud CLI authenticated with Organization Administrator and Billing Administrator roles.
+#   - gcloud CLI authenticated with Organization Administrator or Folder Administrator role.
 #   - Organization ID or parent Folder ID.
-#   - Billing Account ID.
+#   - Note: No billing account is required (IAM & Policy operations are free).
 
 set -euo pipefail
 
@@ -17,7 +17,6 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 PARENT_FOLDER_ID="${PARENT_FOLDER_ID:-}"       # e.g., "123456789012" (leave empty if using ORG_ID)
 ORGANIZATION_ID="${ORGANIZATION_ID:-}"         # e.g., "123456789012" (leave empty if using PARENT_FOLDER_ID)
-BILLING_ACCOUNT_ID="${BILLING_ACCOUNT_ID:-}"   # e.g., "012345-6789AB-CDEF01"
 PROJECT_PREFIX="${PROJECT_PREFIX:-sakm-ci}"    # Prefix for test projects (max 18 chars recommended)
 GITHUB_REPO="${GITHUB_REPO:-jay0lee/go-sa-key-manager}" # Target GitHub repo
 
@@ -36,12 +35,7 @@ echo -e "${BLUE}================================================================
 # Validate Inputs
 if [ -z "${PARENT_FOLDER_ID}" ] && [ -z "${ORGANIZATION_ID}" ]; then
   echo -e "${RED}ERROR: Either PARENT_FOLDER_ID or ORGANIZATION_ID must be provided.${NC}"
-  echo "Usage: ORGANIZATION_ID=\"12345\" BILLING_ACCOUNT_ID=\"012345-...\" ./scripts/setup_gcp_live_test.sh"
-  exit 1
-fi
-
-if [ -z "${BILLING_ACCOUNT_ID}" ]; then
-  echo -e "${RED}ERROR: BILLING_ACCOUNT_ID is required to associate billing with test projects.${NC}"
+  echo "Usage: ORGANIZATION_ID=\"12345\" ./scripts/setup_gcp_live_test.sh"
   exit 1
 fi
 
@@ -87,9 +81,6 @@ echo -e "\n${GREEN}[2/6] Creating 4 consolidated policy projects in folder ${CI_
 for PROJ in "${PROJECTS[@]}"; do
   echo "Creating project: ${PROJ}..."
   gcloud projects create "${PROJ}" --folder="${CI_FOLDER_ID}" --name="${PROJ}"
-
-  echo "Linking billing account..."
-  gcloud billing projects link "${PROJ}" --billing-account="${BILLING_ACCOUNT_ID}"
 
   echo "Enabling necessary APIs on ${PROJ}..."
   gcloud services enable \
