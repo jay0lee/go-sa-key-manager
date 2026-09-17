@@ -179,7 +179,7 @@ func (c *GCPClient) CreateKey(ctx context.Context, saEmail string) (*KeyInfo, er
 func (c *GCPClient) UploadKey(ctx context.Context, saEmail string, publicKeyCertPEM []byte) (*KeyInfo, error) {
 	parent := FormatServiceAccountResourceName(saEmail)
 	req := &iam.UploadServiceAccountKeyRequest{
-		PublicKeyData: string(publicKeyCertPEM),
+		PublicKeyData: base64.StdEncoding.EncodeToString(publicKeyCertPEM),
 	}
 
 	key, err := c.api.UploadServiceAccountKey(ctx, parent, req)
