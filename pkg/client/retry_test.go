@@ -56,6 +56,27 @@ func TestIsRetryableGCPError(t *testing.T) {
 			t.Errorf("expected code %v to NOT be retryable", code)
 		}
 	}
+
+	// NotFound due to service account replication lag
+	replicationErr1 := status.Error(codes.NotFound, "Service account projects/-/serviceAccounts/my-sa@proj.iam.gserviceaccount.com does not exist.")
+	if !IsRetryableGCPError(replicationErr1) {
+		t.Errorf("expected replication lag NotFound to be retryable")
+	}
+
+	replicationErr2 := status.Error(codes.NotFound, "serviceaccounts/my-sa does not exist")
+	if !IsRetryableGCPError(replicationErr2) {
+		t.Errorf("expected replication lag NotFound to be retryable")
+	}
+
+	nonReplicationNotFound1 := status.Error(codes.NotFound, "Key projects/-/serviceAccounts/my-sa/keys/k1 does not exist.")
+	if IsRetryableGCPError(nonReplicationNotFound1) {
+		t.Errorf("expected key NotFound to NOT be retryable")
+	}
+
+	nonReplicationNotFound2 := status.Error(codes.NotFound, "service account has been disabled")
+	if IsRetryableGCPError(nonReplicationNotFound2) {
+		t.Errorf("expected other NotFound to NOT be retryable")
+	}
 }
 
 func TestIsRetryableHTTPStatus(t *testing.T) {

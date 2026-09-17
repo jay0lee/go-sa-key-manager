@@ -216,6 +216,7 @@ func waitForServiceAccountReady(t *testing.T, ctx context.Context, iamClient *ad
 			if listErr == nil {
 				_, pubErr := client.FetchPublicKeys(ctx, nil, "", saEmail)
 				if pubErr == nil {
+					time.Sleep(1 * time.Second)
 					t.Logf("Service account %s is fully propagated in IAM and public metadata endpoint", saEmail)
 					return
 				}
