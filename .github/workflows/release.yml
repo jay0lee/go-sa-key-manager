@@ -54,6 +54,8 @@ jobs:
           - runner: ubuntu-latest
             name: Linux x86_64
             binary: gcp-sa-key-manager-linux-amd64
+            archive: gcp-sa-key-manager-linux-amd64.tar.bz2
+            pkg_type: tar.bz2
             runner_id: linux-amd64
             service_account: sa-ci-linux-amd64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
@@ -63,6 +65,8 @@ jobs:
           - runner: ubuntu-24.04-arm
             name: Linux ARM64
             binary: gcp-sa-key-manager-linux-arm64
+            archive: gcp-sa-key-manager-linux-arm64.tar.bz2
+            pkg_type: tar.bz2
             runner_id: linux-arm64
             service_account: sa-ci-linux-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
@@ -72,6 +76,8 @@ jobs:
           - runner: macos-latest
             name: macOS Apple Silicon (ARM64)
             binary: gcp-sa-key-manager-darwin-arm64
+            archive: gcp-sa-key-manager-darwin-arm64.tar.bz2
+            pkg_type: tar.bz2
             runner_id: macos-arm64
             service_account: sa-ci-macos-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: "-macos 11.0"
@@ -81,6 +87,8 @@ jobs:
           - runner: windows-latest
             name: Windows x86_64
             binary: gcp-sa-key-manager-windows-amd64.exe
+            archive: gcp-sa-key-manager-windows-amd64.zip
+            pkg_type: zip
             runner_id: windows-amd64
             service_account: sa-ci-windows-amd64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
@@ -90,6 +98,8 @@ jobs:
           - runner: windows-11-arm
             name: Windows ARM64
             binary: gcp-sa-key-manager-windows-arm64.exe
+            archive: gcp-sa-key-manager-windows-arm64.zip
+            pkg_type: zip
             runner_id: windows-arm64
             service_account: sa-ci-windows-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
@@ -97,12 +107,13 @@ jobs:
             check_coverage: false
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          go-version: 'stable'
+          check-latest: true
 
       - name: Run unit tests on native architecture
         shell: bash
@@ -146,7 +157,7 @@ jobs:
           ls -la dist/
 
       - name: Authenticate to Google Cloud via Workload Identity Federation
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
           service_account: ${{ matrix.service_account }}
@@ -163,10 +174,26 @@ jobs:
         run: |
           go test -v -tags=live ./test/integration/...
 
-      - name: Upload verified binary artifact
-        uses: actions/upload-artifact@v4
+      - name: Package binary archive (${{ matrix.archive }})
+        shell: bash
+        run: |
+          if [ "${{ matrix.pkg_type }}" = "zip" ]; then
+            if command -v zip >/dev/null 2>&1; then
+              (cd dist && zip "${{ matrix.archive }}" "${{ matrix.binary }}")
+            elif command -v powershell >/dev/null 2>&1; then
+              powershell -Command "Compress-Archive -Path dist/${{ matrix.binary }} -DestinationPath dist/${{ matrix.archive }}"
+            else
+              tar -a -cf "dist/${{ matrix.archive }}" -C dist "${{ matrix.binary }}"
+            fi
+          else
+            tar -cjf "dist/${{ matrix.archive }}" -C dist "${{ matrix.binary }}"
+          fi
+          ls -lh dist/
+
+      - name: Upload verified binary and package artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: binary-${{ matrix.binary }}
+          name: binary-${{ matrix.runner_id }}
           path: dist/*
           if-no-files-found: error
 
@@ -174,12 +201,16 @@ jobs:
     name: Publish Release
     needs: [version, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download all verified binaries
-        uses: actions/download-artifact@v4
+      - name: Download all verified binaries and packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
@@ -190,8 +221,13 @@ jobs:
           sha256sum gcp-sa-key-manager-* > checksums.txt
           cat checksums.txt
 
+      - name: Attest Build Provenance for Binaries and Packages
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/gcp-sa-key-manager-*'
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.version.outputs.version }}
           name: Release ${{ needs.version.outputs.version }}
