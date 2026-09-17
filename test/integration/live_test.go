@@ -258,11 +258,13 @@ func waitForKeyDeleted(t *testing.T, ctx context.Context, iamClient *admin.IamCl
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	keyResource := client.FormatKeyResourceName(saEmail, keyID)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		_, err := iamClient.GetServiceAccountKey(ctx, &adminpb.GetServiceAccountKeyRequest{
 			Name: keyResource,
-		}, client.StandardCallOptions()...)
+		})
 		if err != nil {
+			lastErr = err
 			if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
 				t.Logf("Key %s confirmed deleted", keyID)
 				return
@@ -270,7 +272,7 @@ func waitForKeyDeleted(t *testing.T, ctx context.Context, iamClient *admin.IamCl
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for key %s deletion to propagate", keyID)
+	t.Fatalf("timed out waiting for key %s deletion to propagate (last error: %v)", keyID, lastErr)
 }
 
 func resolveBinaryPath(custom string) string {
@@ -550,16 +552,18 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 
 	// 9. Delete remaining keys (with deletion verification barrier)
 	t.Run("9_DeleteRemainingKeys", func(t *testing.T) {
-		stdout, _, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
+		stdout, stderr, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
 		if err != nil {
-			t.Fatalf("list failed: %v", err)
+			t.Fatalf("list failed: %v\nstderr: %s", err, stderr)
 		}
 		var keys []client.KeyInfo
-		_ = json.Unmarshal([]byte(stdout), &keys)
+		if unmarshalErr := json.Unmarshal([]byte(stdout), &keys); unmarshalErr != nil {
+			t.Fatalf("failed to parse keys list JSON: %v\nstdout: %s", unmarshalErr, stdout)
+		}
 		for _, k := range keys {
-			_, stderr, err := executeCLI("delete", saEmail, k.ID)
-			if err != nil {
-				t.Logf("delete key %s warning: %v\nstderr: %s", k.ID, err, stderr)
+			delStdout, delStderr, delErr := executeCLI("delete", saEmail, k.ID)
+			if delErr != nil {
+				t.Logf("delete key %s warning: %v\nstdout: %s\nstderr: %s", k.ID, delErr, delStdout, delStderr)
 			} else {
 				waitForKeyDeleted(t, ctx, iamClient, saEmail, k.ID)
 			}

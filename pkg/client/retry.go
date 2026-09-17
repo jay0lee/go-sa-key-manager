@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/googleapis/gax-go/v2"
@@ -39,17 +38,6 @@ func IsRetryableGCPError(err error) bool {
 			codes.DeadlineExceeded,
 			codes.Aborted:
 			return true
-		case codes.NotFound:
-			// IAM eventual consistency: newly created service accounts can return NotFound
-			// ("Service account projects/-/serviceAccounts/... does not exist") for several
-			// seconds while propagating across Google's distributed IAM datacenters.
-			msg := strings.ToLower(s.Message())
-			if (strings.Contains(msg, "service account") || strings.Contains(msg, "serviceaccounts")) &&
-				strings.Contains(msg, "does not exist") &&
-				!strings.Contains(msg, "/keys/") {
-				return true
-			}
-			return false
 		default:
 			return false
 		}
