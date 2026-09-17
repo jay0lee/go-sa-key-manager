@@ -15,6 +15,10 @@ import (
 // getBinaryPath returns the path to the compiled gcp-sa-key-manager binary.
 func getBinaryPath(t *testing.T) string {
 	t.Helper()
+	if binPath := resolveBinaryPath(os.Getenv("SAKM_BINARY_PATH")); binPath != "" {
+		return binPath
+	}
+
 	binName := "gcp-sa-key-manager"
 	if runtime.GOOS == "windows" {
 		binName += ".exe"

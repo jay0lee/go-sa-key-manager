@@ -13,6 +13,14 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+
+env:
+  GCP_WIF_PROVIDER: 'projects/47347081886/locations/global/workloadIdentityPools/gh-actions-pool/providers/gh-oidc-provider'
+  GCP_PROJECT_STANDARD: 'sakm-ci-std-8560'
+  GCP_PROJECT_NO_CREATE: 'sakm-ci-noc-8560'
+  GCP_PROJECT_NO_UPLOAD: 'sakm-ci-nou-8560'
+  GCP_PROJECT_EXPIRY_24H: 'sakm-ci-exp-8560'
 
 jobs:
   version:
@@ -35,7 +43,7 @@ jobs:
           echo "version=$VER" >> $GITHUB_OUTPUT
 
   build:
-    name: Build (${{ matrix.name }})
+    name: Build & Test (${{ matrix.name }})
     needs: [version]
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -46,27 +54,47 @@ jobs:
           - runner: ubuntu-latest
             name: Linux x86_64
             binary: gcp-sa-key-manager-linux-amd64
+            runner_id: linux-amd64
+            service_account: sa-ci-linux-amd64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
+            race: true
+            check_coverage: true
           # Native Linux ARM64
           - runner: ubuntu-24.04-arm
             name: Linux ARM64
             binary: gcp-sa-key-manager-linux-arm64
+            runner_id: linux-arm64
+            service_account: sa-ci-linux-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
+            race: true
+            check_coverage: false
           # Native macOS Apple Silicon ARM64 (Intel x86_64 Mac explicitly excluded)
           - runner: macos-latest
             name: macOS Apple Silicon (ARM64)
             binary: gcp-sa-key-manager-darwin-arm64
+            runner_id: macos-arm64
+            service_account: sa-ci-macos-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: "-macos 11.0"
+            race: true
+            check_coverage: false
           # Native Windows x86_64
           - runner: windows-latest
             name: Windows x86_64
             binary: gcp-sa-key-manager-windows-amd64.exe
+            runner_id: windows-amd64
+            service_account: sa-ci-windows-amd64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
-          # Native Windows ARM64
+            race: true
+            check_coverage: false
+          # Native Windows ARM64 (Note: Go race detector / TSAN is unsupported on windows/arm64)
           - runner: windows-11-arm
             name: Windows ARM64
             binary: gcp-sa-key-manager-windows-arm64.exe
+            runner_id: windows-arm64
+            service_account: sa-ci-windows-arm64@sakm-ci-std-8560.iam.gserviceaccount.com
             darwin_flags: ""
+            race: false
+            check_coverage: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -76,7 +104,31 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Build binary on native architecture
+      - name: Run unit tests on native architecture
+        shell: bash
+        run: |
+          if [ "${{ matrix.race }}" = "true" ]; then
+            go test -v -race ./...
+          else
+            go test -v ./...
+          fi
+
+      - name: Verify 100% Test Coverage
+        if: matrix.check_coverage == true
+        shell: bash
+        run: |
+          go test -v -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out > coverage.txt
+          cat coverage.txt
+          TOTAL=$(grep 'total:' coverage.txt | awk '{print $3}')
+          echo "Total coverage: $TOTAL"
+          if [ "$TOTAL" != "100.0%" ]; then
+            echo "ERROR: Code coverage is $TOTAL, which is less than required 100.0%"
+            exit 1
+          fi
+          echo "Code coverage verification passed: 100.0%"
+
+      - name: Build release binary on native architecture
         shell: bash
         run: |
           mkdir -p dist
@@ -93,7 +145,25 @@ jobs:
 
           ls -la dist/
 
-      - name: Upload artifact
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ matrix.service_account }}
+
+      - name: Run Live GCP Integration Tests with Release Binary
+        shell: bash
+        env:
+          GCP_PROJECT_STANDARD: ${{ env.GCP_PROJECT_STANDARD }}
+          GCP_PROJECT_NO_CREATE: ${{ env.GCP_PROJECT_NO_CREATE }}
+          GCP_PROJECT_NO_UPLOAD: ${{ env.GCP_PROJECT_NO_UPLOAD }}
+          GCP_PROJECT_EXPIRY_24H: ${{ env.GCP_PROJECT_EXPIRY_24H }}
+          GCP_RUNNER_ID: ${{ matrix.runner_id }}
+          SAKM_BINARY_PATH: ${{ github.workspace }}/dist/${{ matrix.binary }}
+        run: |
+          go test -v -tags=live ./test/integration/...
+
+      - name: Upload verified binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.binary }}
@@ -108,7 +178,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download all built binaries
+      - name: Download all verified binaries
         uses: actions/download-artifact@v4
         with:
           path: dist

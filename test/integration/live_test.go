@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -242,7 +243,40 @@ func waitForKeyDeleted(t *testing.T, ctx context.Context, iamClient *admin.IamCl
 	t.Fatalf("timed out waiting for key %s deletion to propagate", keyID)
 }
 
+func resolveBinaryPath(custom string) string {
+	if custom == "" {
+		return ""
+	}
+	if filepath.IsAbs(custom) {
+		if _, err := os.Stat(custom); err == nil {
+			return custom
+		}
+	}
+	if abs, err := filepath.Abs(custom); err == nil {
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		projRoot := filepath.Dir(filepath.Dir(cwd))
+		candidate := filepath.Join(projRoot, custom)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func executeCLI(args ...string) (string, string, error) {
+	if binPath := resolveBinaryPath(os.Getenv("SAKM_BINARY_PATH")); binPath != "" {
+		cmdExec := exec.Command(binPath, args...)
+		var stdoutBuf, stderrBuf bytes.Buffer
+		cmdExec.Stdout = &stdoutBuf
+		cmdExec.Stderr = &stderrBuf
+		execErr := cmdExec.Run()
+		return stdoutBuf.String(), stderrBuf.String(), execErr
+	}
+
 	app := cmd.NewDefaultApp()
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
