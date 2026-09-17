@@ -51,6 +51,63 @@ func getLiveConfig(t *testing.T) liveTestConfig {
 	}
 }
 
+// secureWipeAndRemoveDir securely zeroes all file bytes before removing the directory.
+func secureWipeAndRemoveDir(dir string) {
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			if info.Size() > 0 {
+				zeroes := make([]byte, info.Size())
+				_ = os.WriteFile(path, zeroes, 0600)
+			}
+		}
+		return nil
+	})
+	_ = os.RemoveAll(dir)
+}
+
+// revokeAllUserKeys deletes all user-managed keys on the specified service account resource.
+func revokeAllUserKeys(ctx context.Context, iamClient *admin.IamClient, saResourceName string) int {
+	keyReq := &adminpb.ListServiceAccountKeysRequest{
+		Name: saResourceName,
+		KeyTypes: []adminpb.ListServiceAccountKeysRequest_KeyType{
+			adminpb.ListServiceAccountKeysRequest_USER_MANAGED,
+		},
+	}
+	keyResp, err := iamClient.ListServiceAccountKeys(ctx, keyReq)
+	if err != nil {
+		return 0
+	}
+	revoked := 0
+	for _, k := range keyResp.Keys {
+		if err := iamClient.DeleteServiceAccountKey(ctx, &adminpb.DeleteServiceAccountKeyRequest{Name: k.Name}); err == nil {
+			revoked++
+		}
+	}
+	return revoked
+}
+
+// purgeStaleTestArtifacts purges any orphaned test service accounts and their keys from previous/stale runs.
+func purgeStaleTestArtifacts(t *testing.T, ctx context.Context, iamClient *admin.IamClient, projectID, runnerID string) {
+	t.Helper()
+	req := &adminpb.ListServiceAccountsRequest{
+		Name: "projects/" + projectID,
+	}
+	it := iamClient.ListServiceAccounts(ctx, req)
+	prefix := fmt.Sprintf("test-%s-", strings.ReplaceAll(runnerID, "_", "-"))
+	for {
+		sa, err := it.Next()
+		if err != nil {
+			break
+		}
+		// Match test service accounts created by this runner or stale test- accounts
+		if strings.HasPrefix(sa.Email, prefix) || strings.HasPrefix(sa.Email, "test-") {
+			keysRevoked := revokeAllUserKeys(ctx, iamClient, sa.Name)
+			delErr := iamClient.DeleteServiceAccount(ctx, &adminpb.DeleteServiceAccountRequest{Name: sa.Name})
+			t.Logf("[Pre-Test Cleanup] Purged stale SA %s (revoked %d keys, deleted: %v)", sa.Email, keysRevoked, delErr == nil)
+		}
+	}
+}
+
 // createEphemeralServiceAccount creates an ephemeral service account for testing and returns its email and cleanup func.
 func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID, runnerID string) (string, func()) {
 	t.Helper()
@@ -58,6 +115,9 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 	if err != nil {
 		t.Fatalf("failed to initialize IAM Admin client: %v", err)
 	}
+
+	// 1. Security requirement: Start by revoking any stale test keys and accounts from previous runs
+	purgeStaleTestArtifacts(t, ctx, iamClient, projectID, runnerID)
 
 	accountID := fmt.Sprintf("test-%s-%d", strings.ReplaceAll(runnerID, "_", "-"), time.Now().Unix())
 	if len(accountID) > 30 {
@@ -81,11 +141,18 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 	email := sa.Email
 	t.Logf("Created ephemeral test service account: %s", email)
 
+	// Explicitly verify zero user keys exist initially
+	revokeAllUserKeys(ctx, iamClient, sa.Name)
+
 	// Allow GCP IAM eventual consistency propagation
 	time.Sleep(3 * time.Second)
 
 	cleanup := func() {
 		defer iamClient.Close()
+		// 2. Security requirement: Revoke and delete ALL user-managed keys at end of testing
+		keysRevoked := revokeAllUserKeys(context.Background(), iamClient, sa.Name)
+		t.Logf("[Post-Test Cleanup] Revoked %d user-managed keys on %s", keysRevoked, email)
+
 		t.Logf("Deleting ephemeral test service account: %s", email)
 		delReq := &adminpb.DeleteServiceAccountRequest{
 			Name: "projects/" + projectID + "/serviceAccounts/" + email,
@@ -119,6 +186,7 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
+	defer secureWipeAndRemoveDir(tmpDir)
 
 	// 1. Create GCP-managed key
 	t.Run("1_CreateKey", func(t *testing.T) {
@@ -318,6 +386,7 @@ func TestLive_Policy_NoCreate(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
+	defer secureWipeAndRemoveDir(tmpDir)
 
 	// 1. GCP-managed key creation MUST FAIL with friendly policy violation
 	t.Run("Create_ShouldFailPolicy", func(t *testing.T) {
@@ -365,6 +434,7 @@ func TestLive_Policy_NoUpload(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
+	defer secureWipeAndRemoveDir(tmpDir)
 
 	// 1. Local key generate MUST FAIL (uploading public cert is blocked)
 	t.Run("Generate_ShouldFailPolicy", func(t *testing.T) {
@@ -400,6 +470,7 @@ func TestLive_Policy_KeyExpiryHours(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
+	defer secureWipeAndRemoveDir(tmpDir)
 
 	// 1. Key generation with 720h (30 days > 24 hours) MUST FAIL with policy violation
 	t.Run("Generate_ExceedsExpiry_ShouldFailPolicy", func(t *testing.T) {

@@ -49,6 +49,7 @@ func TestLive_CLI_BinaryExecution(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
+	defer secureWipeAndRemoveDir(tmpDir)
 
 	// 1. Version check
 	t.Run("CLI_Version", func(t *testing.T) {

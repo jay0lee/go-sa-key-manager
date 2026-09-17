@@ -139,6 +139,7 @@ TMP_POLICY_V1=$(mktemp)
 cat << POLICY_EOF > "${TMP_POLICY_V1}"
 constraint: constraints/iam.serviceAccountKeyExpiryHours
 listPolicy:
+  inheritFromParent: false
   allowedValues:
   - "24h"
 POLICY_EOF
@@ -183,18 +184,21 @@ for RUNNER in "${RUNNER_NAMES[@]}"; do
       --display-name="CI Runner SA for ${RUNNER}"
   fi
 
-  # Grant permissions across all 4 test projects
-  echo "Granting IAM roles across the 4 test projects to ${SA_EMAIL}..."
+  # Grant least-privilege permissions across all 4 test projects
+  echo "Granting least-privilege IAM roles across test projects to ${SA_EMAIL}..."
+  LEAST_PRIVILEGE_ROLES=(
+    "roles/iam.serviceAccountKeyAdmin" # Strictly key CRUD, get, list, disable, enable, delete
+    "roles/iam.serviceAccountCreator"  # Strictly create ephemeral test SAs
+    "roles/iam.serviceAccountDeleter"  # Strictly delete ephemeral test SAs
+    "roles/iam.serviceAccountViewer"   # Strictly view/list test SAs for cleanup
+  )
   for PROJ in "${PROJECTS[@]}"; do
-    gcloud projects add-iam-policy-binding "${PROJ}" \
-      --member="serviceAccount:${SA_EMAIL}" \
-      --role="roles/iam.serviceAccountAdmin" \
-      --quiet >/dev/null
-
-    gcloud projects add-iam-policy-binding "${PROJ}" \
-      --member="serviceAccount:${SA_EMAIL}" \
-      --role="roles/iam.serviceAccountKeyAdmin" \
-      --quiet >/dev/null
+    for ROLE in "${LEAST_PRIVILEGE_ROLES[@]}"; do
+      gcloud projects add-iam-policy-binding "${PROJ}" \
+        --member="serviceAccount:${SA_EMAIL}" \
+        --role="${ROLE}" \
+        --quiet >/dev/null
+    done
   done
 done
 
