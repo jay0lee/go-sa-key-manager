@@ -141,6 +141,13 @@ func TestWrapGCPError_GRPCStatus(t *testing.T) {
 			expectedRemediation: "Specify a shorter validity period",
 		},
 		{
+			name:                "Policy violation - longer than max allowed lifetime wording",
+			st:                  status.New(codes.InvalidArgument, "The given public key has a lifetime of 2,592,000 seconds, which is longer than the max allowed lifetime of 86,400 seconds as specified in resource settings or in organization policy."),
+			isPolicyViolation:   true,
+			expectedConstraint:  ConstraintKeyExpiryHours,
+			expectedRemediation: "Specify a shorter validity period",
+		},
+		{
 			name:                 "FailedPrecondition generic",
 			st:                   status.New(codes.FailedPrecondition, "general precondition failed"),
 			expectedCode:         codes.FailedPrecondition,

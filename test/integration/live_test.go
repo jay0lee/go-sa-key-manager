@@ -247,19 +247,29 @@ func TestLive_FullLifecycle_StandardProject(t *testing.T) {
 		}
 	})
 
-	// 2. List keys in JSON format
+	// 2. List keys in JSON format (polling for index propagation)
 	var createdKeyID string
 	t.Run("2_ListKeys", func(t *testing.T) {
-		stdout, stderr, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
-		if err != nil {
-			t.Fatalf("list failed: %v\nstderr: %s", err, stderr)
-		}
 		var keys []client.KeyInfo
-		if err := json.Unmarshal([]byte(stdout), &keys); err != nil {
-			t.Fatalf("failed to parse json list output: %v\noutput: %s", err, stdout)
+		var lastOut string
+		var lastErr error
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			stdout, stderr, err := executeCLI("list", saEmail, "--type", "user", "-f", "json")
+			if err == nil {
+				lastOut = stdout
+				var parsed []client.KeyInfo
+				if jsonErr := json.Unmarshal([]byte(stdout), &parsed); jsonErr == nil && len(parsed) > 0 {
+					keys = parsed
+					break
+				}
+			} else {
+				lastErr = fmt.Errorf("list error: %v (stderr: %s)", err, stderr)
+			}
+			time.Sleep(1 * time.Second)
 		}
 		if len(keys) == 0 {
-			t.Fatalf("expected at least 1 user key, found 0")
+			t.Fatalf("expected at least 1 user key, found 0 (last output: %s, last err: %v)", lastOut, lastErr)
 		}
 		createdKeyID = keys[0].ID
 		t.Logf("Found key ID: %s", createdKeyID)

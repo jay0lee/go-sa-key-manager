@@ -183,6 +183,7 @@ func detectPolicyViolation(msg string, err error) *PolicyViolationError {
 	if strings.Contains(msg, string(ConstraintKeyExpiryHours)) ||
 		strings.Contains(lowerMsg, "keyexpiryhours") ||
 		strings.Contains(lowerMsg, "expiration time exceeds the maximum allowed duration") ||
+		strings.Contains(lowerMsg, "longer than the max allowed lifetime") ||
 		strings.Contains(lowerMsg, "key validity exceeds") {
 		return &PolicyViolationError{
 			Constraint:  ConstraintKeyExpiryHours,
