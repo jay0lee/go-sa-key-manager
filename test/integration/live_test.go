@@ -127,7 +127,9 @@ func purgeStaleTestArtifacts(t *testing.T, ctx context.Context, iamClient *admin
 	}
 }
 
-// createEphemeralServiceAccount creates an ephemeral service account for testing and returns its email, IAM client, and cleanup func.
+// createEphemeralServiceAccount gets or creates a reusable test service account for this runner and project,
+// and returns its email, IAM client, and cleanup func. All user-managed keys are revoked before and after
+// testing, but the service account is retained for reuse to avoid GCP IAM creation rate limits and propagation lag.
 func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID, runnerID string) (string, *admin.IamClient, func()) {
 	t.Helper()
 	iamClient, err := admin.NewIamClient(ctx)
@@ -135,64 +137,70 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 		t.Fatalf("failed to initialize IAM Admin client: %v", err)
 	}
 
-	// 1. Security requirement: Start by revoking any stale test keys and accounts from previous runs
+	// 1. Clean up any legacy timestamped service accounts from previous runs
 	purgeStaleTestArtifacts(t, ctx, iamClient, projectID, runnerID)
 
-	accountID := fmt.Sprintf("test-%s-%d", strings.ReplaceAll(runnerID, "_", "-"), time.Now().Unix())
+	accountID := fmt.Sprintf("test-%s", strings.ReplaceAll(runnerID, "_", "-"))
 	if len(accountID) > 30 {
 		accountID = accountID[:30]
 	}
 
-	req := &adminpb.CreateServiceAccountRequest{
-		Name:      "projects/" + projectID,
-		AccountId: accountID,
-		ServiceAccount: &adminpb.ServiceAccount{
-			DisplayName: fmt.Sprintf("Live Test SA %s (%s)", accountID, runnerID),
-		},
+	email := fmt.Sprintf("%s@%s.iam.gserviceaccount.com", accountID, projectID)
+	resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, email)
+
+	// Check if the service account already exists
+	sa, getErr := iamClient.GetServiceAccount(ctx, &adminpb.GetServiceAccountRequest{Name: resourceName}, client.StandardCallOptions()...)
+	if getErr != nil {
+		if s, ok := status.FromError(getErr); ok && s.Code() == codes.NotFound {
+			t.Logf("Test service account %s not found; creating it...", email)
+			req := &adminpb.CreateServiceAccountRequest{
+				Name:      "projects/" + projectID,
+				AccountId: accountID,
+				ServiceAccount: &adminpb.ServiceAccount{
+					DisplayName: fmt.Sprintf("Live Test SA %s", accountID),
+				},
+			}
+
+			backoffCfg := client.BackoffConfig{
+				InitialDelay: 2 * time.Second,
+				MaxDelay:     60 * time.Second,
+				Multiplier:   2.0,
+				MaxAttempts:  10,
+				OnRetry: func(attempt int, pause time.Duration, err error) {
+					t.Logf("[GCP Rate Limit/Backoff] CreateServiceAccount attempt %d hit temporary error: %v. Backing off for %v...", attempt, err, pause)
+				},
+			}
+			createErr := client.RetryWithBackoff(ctx, backoffCfg, func() error {
+				var opErr error
+				sa, opErr = iamClient.CreateServiceAccount(ctx, req, client.StandardCallOptions()...)
+				return opErr
+			})
+			if createErr != nil {
+				iamClient.Close()
+				t.Fatalf("failed to create test service account %s in %s: %v", accountID, projectID, createErr)
+			}
+			t.Logf("Created new test service account: %s", sa.Email)
+			waitForServiceAccountReady(t, ctx, iamClient, email)
+		} else {
+			iamClient.Close()
+			t.Fatalf("failed to check test service account %s: %v", email, getErr)
+		}
+	} else {
+		t.Logf("Reusing existing test service account: %s", sa.Email)
 	}
 
-	var sa *adminpb.ServiceAccount
-	backoffCfg := client.BackoffConfig{
-		InitialDelay: 2 * time.Second,
-		MaxDelay:     60 * time.Second,
-		Multiplier:   2.0,
-		MaxAttempts:  10,
-		OnRetry: func(attempt int, pause time.Duration, err error) {
-			t.Logf("[GCP Rate Limit/Backoff] CreateServiceAccount attempt %d hit temporary error: %v. Backing off for %v...", attempt, err, pause)
-		},
+	// Explicitly ensure clean slate before starting test: revoke all leftover keys
+	keysRevoked := revokeAllUserKeys(ctx, iamClient, resourceName)
+	if keysRevoked > 0 {
+		t.Logf("[Pre-Test Cleanup] Revoked %d leftover user-managed keys on %s", keysRevoked, email)
 	}
-	err = client.RetryWithBackoff(ctx, backoffCfg, func() error {
-		var createErr error
-		sa, createErr = iamClient.CreateServiceAccount(ctx, req, client.StandardCallOptions()...)
-		return createErr
-	})
-	if err != nil {
-		iamClient.Close()
-		t.Fatalf("failed to create ephemeral test service account %s in %s: %v", accountID, projectID, err)
-	}
-
-	email := sa.Email
-	t.Logf("Created ephemeral test service account: %s", email)
-
-	// Explicitly verify zero user keys exist initially
-	revokeAllUserKeys(ctx, iamClient, sa.Name)
-
-	// Wait for newly created service account to propagate in IAM and public metadata endpoint
-	waitForServiceAccountReady(t, ctx, iamClient, email)
 
 	cleanup := func() {
 		defer iamClient.Close()
-		// 2. Security requirement: Revoke and delete ALL user-managed keys at end of testing
-		keysRevoked := revokeAllUserKeys(context.Background(), iamClient, sa.Name)
-		t.Logf("[Post-Test Cleanup] Revoked %d user-managed keys on %s", keysRevoked, email)
-
-		t.Logf("Deleting ephemeral test service account: %s", email)
-		delReq := &adminpb.DeleteServiceAccountRequest{
-			Name: "projects/" + projectID + "/serviceAccounts/" + email,
-		}
-		_ = client.RetryWithBackoff(context.Background(), client.DefaultBackoffConfig(), func() error {
-			return iamClient.DeleteServiceAccount(context.Background(), delReq, client.StandardCallOptions()...)
-		})
+		// Security requirement: Revoke and delete ALL user-managed keys at end of testing,
+		// but preserve the service account so subsequent tests and runs can reuse it.
+		postRevoked := revokeAllUserKeys(context.Background(), iamClient, resourceName)
+		t.Logf("[Post-Test Cleanup] Revoked %d user-managed keys on %s (service account preserved for reuse)", postRevoked, email)
 	}
 
 	return email, iamClient, cleanup
