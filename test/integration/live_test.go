@@ -82,7 +82,10 @@ func revokeAllUserKeys(ctx context.Context, iamClient *admin.IamClient, saResour
 	}
 	revoked := 0
 	for _, k := range keyResp.Keys {
-		if err := iamClient.DeleteServiceAccountKey(ctx, &adminpb.DeleteServiceAccountKeyRequest{Name: k.Name}); err == nil {
+		err := client.RetryWithBackoff(ctx, client.DefaultBackoffConfig(), func() error {
+			return iamClient.DeleteServiceAccountKey(ctx, &adminpb.DeleteServiceAccountKeyRequest{Name: k.Name}, client.StandardCallOptions()...)
+		})
+		if err == nil {
 			revoked++
 		}
 	}
@@ -116,7 +119,9 @@ func purgeStaleTestArtifacts(t *testing.T, ctx context.Context, iamClient *admin
 				}
 			}
 			keysRevoked := revokeAllUserKeys(ctx, iamClient, sa.Name)
-			delErr := iamClient.DeleteServiceAccount(ctx, &adminpb.DeleteServiceAccountRequest{Name: sa.Name})
+			delErr := client.RetryWithBackoff(ctx, client.DefaultBackoffConfig(), func() error {
+				return iamClient.DeleteServiceAccount(ctx, &adminpb.DeleteServiceAccountRequest{Name: sa.Name}, client.StandardCallOptions()...)
+			})
 			t.Logf("[Pre-Test Cleanup] Purged stale SA %s (revoked %d keys, deleted: %v)", sa.Email, keysRevoked, delErr == nil)
 		}
 	}
@@ -146,7 +151,21 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 		},
 	}
 
-	sa, err := iamClient.CreateServiceAccount(ctx, req)
+	var sa *adminpb.ServiceAccount
+	backoffCfg := client.BackoffConfig{
+		InitialDelay: 2 * time.Second,
+		MaxDelay:     60 * time.Second,
+		Multiplier:   2.0,
+		MaxAttempts:  10,
+		OnRetry: func(attempt int, pause time.Duration, err error) {
+			t.Logf("[GCP Rate Limit/Backoff] CreateServiceAccount attempt %d hit temporary error: %v. Backing off for %v...", attempt, err, pause)
+		},
+	}
+	err = client.RetryWithBackoff(ctx, backoffCfg, func() error {
+		var createErr error
+		sa, createErr = iamClient.CreateServiceAccount(ctx, req, client.StandardCallOptions()...)
+		return createErr
+	})
 	if err != nil {
 		iamClient.Close()
 		t.Fatalf("failed to create ephemeral test service account %s in %s: %v", accountID, projectID, err)
@@ -171,7 +190,9 @@ func createEphemeralServiceAccount(t *testing.T, ctx context.Context, projectID,
 		delReq := &adminpb.DeleteServiceAccountRequest{
 			Name: "projects/" + projectID + "/serviceAccounts/" + email,
 		}
-		_ = iamClient.DeleteServiceAccount(context.Background(), delReq)
+		_ = client.RetryWithBackoff(context.Background(), client.DefaultBackoffConfig(), func() error {
+			return iamClient.DeleteServiceAccount(context.Background(), delReq, client.StandardCallOptions()...)
+		})
 	}
 
 	return email, iamClient, cleanup
@@ -184,14 +205,14 @@ func waitForServiceAccountReady(t *testing.T, ctx context.Context, iamClient *ad
 	deadline := time.Now().Add(60 * time.Second)
 	resourceName := "projects/-/serviceAccounts/" + saEmail
 	for time.Now().Before(deadline) {
-		sa, saErr := iamClient.GetServiceAccount(ctx, &adminpb.GetServiceAccountRequest{Name: resourceName})
+		sa, saErr := iamClient.GetServiceAccount(ctx, &adminpb.GetServiceAccountRequest{Name: resourceName}, client.StandardCallOptions()...)
 		if saErr == nil && sa != nil {
 			_, listErr := iamClient.ListServiceAccountKeys(ctx, &adminpb.ListServiceAccountKeysRequest{
 				Name: resourceName,
 				KeyTypes: []adminpb.ListServiceAccountKeysRequest_KeyType{
 					adminpb.ListServiceAccountKeysRequest_USER_MANAGED,
 				},
-			})
+			}, client.StandardCallOptions()...)
 			if listErr == nil {
 				_, pubErr := client.FetchPublicKeys(ctx, nil, "", saEmail)
 				if pubErr == nil {
@@ -213,7 +234,7 @@ func waitForKeyStatus(t *testing.T, ctx context.Context, iamClient *admin.IamCli
 	for time.Now().Before(deadline) {
 		key, err := iamClient.GetServiceAccountKey(ctx, &adminpb.GetServiceAccountKeyRequest{
 			Name: keyResource,
-		})
+		}, client.StandardCallOptions()...)
 		if err == nil && key != nil && key.Disabled == wantDisabled {
 			t.Logf("Key %s has reached disabled=%v", keyID, wantDisabled)
 			return
@@ -231,7 +252,7 @@ func waitForKeyDeleted(t *testing.T, ctx context.Context, iamClient *admin.IamCl
 	for time.Now().Before(deadline) {
 		_, err := iamClient.GetServiceAccountKey(ctx, &adminpb.GetServiceAccountKeyRequest{
 			Name: keyResource,
-		})
+		}, client.StandardCallOptions()...)
 		if err != nil {
 			if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
 				t.Logf("Key %s confirmed deleted", keyID)

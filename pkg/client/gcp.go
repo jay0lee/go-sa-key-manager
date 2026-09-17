@@ -73,7 +73,7 @@ func (c *GCPClient) ListKeys(ctx context.Context, saEmail string, keyTypes []Key
 		KeyTypes: protoKeyTypes,
 	}
 
-	resp, err := c.api.ListServiceAccountKeys(ctx, req)
+	resp, err := c.api.ListServiceAccountKeys(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return nil, errors.WrapGCPError(err)
 	}
@@ -92,7 +92,7 @@ func (c *GCPClient) GetKey(ctx context.Context, saEmail, keyID string) (*KeyInfo
 		PublicKeyType: adminpb.ServiceAccountPublicKeyType_TYPE_X509_PEM_FILE,
 	}
 
-	resp, err := c.api.GetServiceAccountKey(ctx, req)
+	resp, err := c.api.GetServiceAccountKey(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return nil, errors.WrapGCPError(err)
 	}
@@ -108,7 +108,7 @@ func (c *GCPClient) CreateKey(ctx context.Context, saEmail string) (*KeyInfo, er
 		KeyAlgorithm:       adminpb.ServiceAccountKeyAlgorithm_KEY_ALG_RSA_2048,
 	}
 
-	resp, err := c.api.CreateServiceAccountKey(ctx, req)
+	resp, err := c.api.CreateServiceAccountKey(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return nil, errors.WrapGCPError(err)
 	}
@@ -123,7 +123,7 @@ func (c *GCPClient) UploadKey(ctx context.Context, saEmail string, publicKeyCert
 		PublicKeyData: publicKeyCertPEM,
 	}
 
-	resp, err := c.api.UploadServiceAccountKey(ctx, req)
+	resp, err := c.api.UploadServiceAccountKey(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return nil, errors.WrapGCPError(err)
 	}
@@ -137,7 +137,7 @@ func (c *GCPClient) DeleteKey(ctx context.Context, saEmail, keyID string) error 
 		Name: FormatKeyResourceName(saEmail, keyID),
 	}
 
-	err := c.api.DeleteServiceAccountKey(ctx, req)
+	err := c.api.DeleteServiceAccountKey(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return errors.WrapGCPError(err)
 	}
@@ -150,7 +150,7 @@ func (c *GCPClient) DisableKey(ctx context.Context, saEmail, keyID string) error
 		Name: FormatKeyResourceName(saEmail, keyID),
 	}
 
-	err := c.api.DisableServiceAccountKey(ctx, req)
+	err := c.api.DisableServiceAccountKey(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return errors.WrapGCPError(err)
 	}
@@ -163,7 +163,7 @@ func (c *GCPClient) EnableKey(ctx context.Context, saEmail, keyID string) error 
 		Name: FormatKeyResourceName(saEmail, keyID),
 	}
 
-	err := c.api.EnableServiceAccountKey(ctx, req)
+	err := c.api.EnableServiceAccountKey(ctx, req, StandardCallOptions()...)
 	if err != nil {
 		return errors.WrapGCPError(err)
 	}
